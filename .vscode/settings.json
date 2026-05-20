@@ -1,0 +1,18 @@
+{
+  "C_Cpp.intelliSenseEngine": "default",
+  "idf.extensionActivationMode": "always",
+  "idf.openOcdConfigs": [
+    "board/esp32p4-bridge.cfg"
+  ],
+  "idf.portWin": "COM9",
+  "idf.buildPath": "${workspaceFolder}\\build",
+  "idf.currentSetup": "c:\\ESP-IDF\\v6.0.1\\esp-idf",
+  "idf.customExtraVars": {
+    "OPENOCD_SCRIPTS": "c:\\ESP-IDF\\IDF_TOOLS_PATH\\tools\\openocd-esp32\\v0.12.0-esp32-20260304/openocd-esp32/share/openocd/scripts",
+    "IDF_CCACHE_ENABLE": "1",
+    "ESP_ROM_ELF_DIR": "c:\\ESP-IDF\\IDF_TOOLS_PATH\\tools\\esp-rom-elfs\\20241011/",
+    "IDF_TARGET": "esp32p4"
+  },
+  "C_Cpp.errorSquiggles": "enabled",
+  "idf.flashType": "UART"
+}
