@@ -338,16 +338,30 @@ int fall_detector_run(const uint8_t *rgb565_buf, int src_w, int src_h, fd_result
         return 0;
     }
     
-    out->valid = 1;
+     out->valid = 1;
     out->person_score = detections[4];
     
     float *best_kpts = &detections[6];
     int kpt_indices[NUM_KEYPOINTS] = {11, 12, 13, 14, 15, 16};
     
+    // 计算 letterbox 参数（与预处理一致）
+    float scale = fminf((float)MODEL_INPUT_W / src_w, (float)MODEL_INPUT_H / src_h);
+    int new_w = (int)(src_w * scale);
+    int new_h = (int)(src_h * scale);
+    int pad_x = (MODEL_INPUT_W - new_w) / 2;
+    int pad_y = (MODEL_INPUT_H - new_h) / 2;
+    
     for (int k = 0; k < NUM_KEYPOINTS; k++) {
         int idx = kpt_indices[k];
-        out->kpts[k].x = best_kpts[idx * 3];
-        out->kpts[k].y = best_kpts[idx * 3 + 1];
+        float raw_x = best_kpts[idx * 3];
+        float raw_y = best_kpts[idx * 3 + 1];
+        
+        // 补偿 letterbox 边框，转换到原图比例
+        float valid_x = (raw_x * MODEL_INPUT_W - pad_x) / new_w;
+        float valid_y = (raw_y * MODEL_INPUT_H - pad_y) / new_h;
+        
+        out->kpts[k].x = fmaxf(0, fminf(1, valid_x));
+        out->kpts[k].y = fmaxf(0, fminf(1, valid_y));
         out->kpts[k].conf = best_kpts[idx * 3 + 2];
     }
 

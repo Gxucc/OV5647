@@ -133,7 +133,7 @@
 #include "esp_err.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
-#include "esp_heap_caps.h"  // 新增
+#include "esp_heap_caps.h"
 #include "lcd_display.h"
 #include "fall_detector.h"
 #include "test_image.h"
@@ -221,11 +221,10 @@ void app_main(void)
 
     ESP_LOGI(TAG, "Ready! Processing static image...");
 
-    // 图片在 Flash 中（const）
-    const uint8_t *rgb_buf = test_image_000000397133_jpg;
-    uint32_t rgb_size = test_image_000000397133_jpg_len;
+    // 使用固定变量名
+    const uint8_t *rgb_buf = test_image;
+    uint32_t rgb_size = test_image_len;
 
-    // 绘制缓冲区在 PSRAM 中
     uint8_t *draw_buf = heap_caps_malloc(TEST_IMAGE_WIDTH * TEST_IMAGE_HEIGHT * 2, MALLOC_CAP_SPIRAM);
     if (!draw_buf) {
         ESP_LOGE(TAG, "Failed to alloc draw_buf in PSRAM");
@@ -233,7 +232,6 @@ void app_main(void)
     }
 
     while (1) {
-        // 从 Flash 复制到 PSRAM
         memcpy(draw_buf, rgb_buf, rgb_size);
 
         fd_result_t result;
