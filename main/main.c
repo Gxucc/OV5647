@@ -1,4 +1,5 @@
 // #include <stdio.h>
+// #include <string.h>
 // #include "freertos/FreeRTOS.h"
 // #include "freertos/task.h"
 // #include "esp_log.h"
@@ -7,9 +8,70 @@
 // #include "nvs_flash.h"
 // #include "cam_net.h"
 // #include "lcd_display.h"
-// #include "net_service.h"
+// #include "fall_detector.h"
 
 // static const char *TAG = "main";
+
+// static const uint16_t KPT_COLORS[6] = {
+//     0xF800, 0xF800, 0x07E0, 0x07E0, 0x001F, 0x001F
+// };
+
+// static void draw_point(uint16_t *pixels, int x, int y, int w, int h, uint16_t color, int size)
+// {
+//     for (int dy = -size; dy <= size; dy++) {
+//         for (int dx = -size; dx <= size; dx++) {
+//             int px = x + dx;
+//             int py = y + dy;
+//             if (px >= 0 && px < w && py >= 0 && py < h) {
+//                 pixels[py * w + px] = color;
+//             }
+//         }
+//     }
+// }
+
+// static void draw_line(uint16_t *pixels, int x1, int y1, int x2, int y2, int w, int h, uint16_t color)
+// {
+//     int dx = abs(x2 - x1), sx = x1 < x2 ? 1 : -1;
+//     int dy = -abs(y2 - y1), sy = y1 < y2 ? 1 : -1;
+//     int err = dx + dy;
+    
+//     while (1) {
+//         if (x1 >= 0 && x1 < w && y1 >= 0 && y1 < h) {
+//             pixels[y1 * w + x1] = color;
+//         }
+//         if (x1 == x2 && y1 == y2) break;
+//         int e2 = 2 * err;
+//         if (e2 >= dy) { err += dy; x1 += sx; }
+//         if (e2 <= dx) { err += dx; y1 += sy; }
+//     }
+// }
+
+// static void draw_results_on_camera(uint8_t *rgb565_buf, int cam_w, int cam_h, fd_result_t *result)
+// {
+//     if (!result->valid) return;
+    
+//     uint16_t *pixels = (uint16_t*)rgb565_buf;
+    
+//     for (int k = 0; k < 6; k++) {
+//         int x = (int)(result->kpts[k].x * cam_w);
+//         int y = (int)(result->kpts[k].y * cam_h);
+//         draw_point(pixels, x, y, cam_w, cam_h, KPT_COLORS[k], 3);
+//     }
+    
+//     int lx0 = (int)(result->kpts[0].x * cam_w), ly0 = (int)(result->kpts[0].y * cam_h);
+//     int lx1 = (int)(result->kpts[2].x * cam_w), ly1 = (int)(result->kpts[2].y * cam_h);
+//     int lx2 = (int)(result->kpts[4].x * cam_w), ly2 = (int)(result->kpts[4].y * cam_h);
+//     draw_line(pixels, lx0, ly0, lx1, ly1, cam_w, cam_h, 0xFFFF);
+//     draw_line(pixels, lx1, ly1, lx2, ly2, cam_w, cam_h, 0xFFFF);
+    
+//     int rx0 = (int)(result->kpts[1].x * cam_w), ry0 = (int)(result->kpts[1].y * cam_h);
+//     int rx1 = (int)(result->kpts[3].x * cam_w), ry1 = (int)(result->kpts[3].y * cam_h);
+//     int rx2 = (int)(result->kpts[5].x * cam_w), ry2 = (int)(result->kpts[5].y * cam_h);
+//     draw_line(pixels, rx0, ry0, rx1, ry1, cam_w, cam_h, 0xFFFF);
+//     draw_line(pixels, rx1, ry1, rx2, ry2, cam_w, cam_h, 0xFFFF);
+    
+//     draw_line(pixels, lx0, ly0, rx0, ry0, cam_w, cam_h, 0xFFE0);
+// }
 
 // void app_main(void)
 // {
@@ -22,15 +84,16 @@
 //     }
 //     ESP_ERROR_CHECK(ret);
 
-//     // 初始化
 //     ESP_ERROR_CHECK(cam_net_init());
 //     ESP_ERROR_CHECK(lcd_display_init());
-//     // ESP_ERROR_CHECK(net_service_wifi_init());
-//     // ESP_ERROR_CHECK(net_service_http_start());
+
+//     if (fall_detector_init() != 0) {
+//         ESP_LOGE(TAG, "Model init failed");
+//         return;
+//     }
 
 //     ESP_LOGI(TAG, "Ready!");
 
-//     // 帧率统计
 //     int64_t last_time = esp_timer_get_time();
 //     int frame_count = 0;
 
@@ -38,33 +101,28 @@
 //         uint8_t *rgb_buf = NULL;
 //         uint32_t rgb_size = 0;
 
-//         if (cam_net_get_rgb565(&rgb_buf, &rgb_size) == ESP_OK) 
-//         {
-//             // 1. LCD 显示（本地，全速）
-//             lcd_display_camera(rgb_buf, 800, 800);
+//         if (cam_net_get_rgb565(&rgb_buf, &rgb_size) == ESP_OK) {
+//             fd_result_t result;
+//             //fall_detector_run(rgb_buf, 800, 640, &result);
+            
+//             if (result.valid) {
+//               //  draw_results_on_camera(rgb_buf, 800, 640, &result);
+//             }
+            
+//             lcd_display_camera(rgb_buf, 800, 640);
 
-//             // // 2. JPEG 编码
-//             // uint8_t *jpeg_buf = NULL;
-//             // uint32_t jpeg_size = 0;
-//             // if (cam_net_encode_jpeg(rgb_buf, rgb_size, &jpeg_buf, &jpeg_size) == ESP_OK) {
-//             //     // 3. 放入队列（非阻塞，WiFi独立发送）
-//             //     net_service_jpeg_update(jpeg_buf, jpeg_size);
-//             // }
-
-//             // 4. 归还 V4L2 缓冲
 //             cam_net_release_rgb565();
 
-//             // 帧率统计
 //             frame_count++;
 //             int64_t now = esp_timer_get_time();
 //             if (now - last_time >= 1000000) {
-//                 ESP_LOGI(TAG, "LCD FPS: %d", frame_count);
+//                 ESP_LOGI(TAG, "FPS: %d", frame_count);
 //                 frame_count = 0;
 //                 last_time = now;
 //             }
 //         }
 
-//        // vTaskDelay(pdMS_TO_TICKS(1));  // 最小延迟，让出CPU
+//         vTaskDelay(pdMS_TO_TICKS(1));
 //     }
 // }
 #include <stdio.h>
@@ -75,48 +133,72 @@
 #include "esp_err.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
-#include "cam_net.h"
+#include "esp_heap_caps.h"  // 新增
 #include "lcd_display.h"
-#include "net_service.h"
-#include "yolo11_pose_wrapper.h"
+#include "fall_detector.h"
+#include "test_image.h"
 
 static const char *TAG = "main";
 
-#define INFER_EVERY_N_FRAMES    3  // 每 3 帧推理 1 次
-static int s_frame_counter = 0;
+static const uint16_t KPT_COLORS[6] = {
+    0xF800, 0xF800, 0x07E0, 0x07E0, 0x001F, 0x001F
+};
 
-// 画关键点（坐标映射需根据实际模型输入调整）
-static void draw_keypoints_on_lcd(uint8_t *rgb565_buf, int buf_w, int buf_h,
-                                  yolo11_pose_result_t *result)
+static void draw_point(uint16_t *pixels, int x, int y, int w, int h, uint16_t color, int size)
 {
-    // 模型内部用 letterbox，输出坐标是相对于模型输入的
-    // 需要从 ImagePreprocessor 获取实际缩放比例
-    // 暂时假设模型输入 640x640，letterbox 后有效区域居中
-    
-    float scale_x = 800.0f / 640.0f;   // 需根据实际调整
-    float scale_y = 600.0f / 640.0f;
-    int offset_x = (1024 - 800) / 2;
-    
-    for (int i = 0; i < YOLO11_NUM_KEYPOINTS; i++) {
-        float kx = result->keypoint[i * 2 + 0];
-        float ky = result->keypoint[i * 2 + 1];
-        
-        if (kx < 1.0f && ky < 1.0f) continue;
-        
-        int lcd_x = (int)(kx * scale_x) + offset_x;
-        int lcd_y = (int)(ky * scale_y);
-        
-        for (int dy = -2; dy <= 2; dy++) {
-            for (int dx = -2; dx <= 2; dx++) {
-                int px = lcd_x + dx;
-                int py = lcd_y + dy;
-                if (px >= 0 && px < buf_w && py >= 0 && py < buf_h) {
-                    uint16_t *pixel = (uint16_t*)(rgb565_buf + (py * buf_w + px) * 2);
-                    *pixel = 0xF800;
-                }
+    for (int dy = -size; dy <= size; dy++) {
+        for (int dx = -size; dx <= size; dx++) {
+            int px = x + dx;
+            int py = y + dy;
+            if (px >= 0 && px < w && py >= 0 && py < h) {
+                pixels[py * w + px] = color;
             }
         }
     }
+}
+
+static void draw_line(uint16_t *pixels, int x1, int y1, int x2, int y2, int w, int h, uint16_t color)
+{
+    int dx = abs(x2 - x1), sx = x1 < x2 ? 1 : -1;
+    int dy = -abs(y2 - y1), sy = y1 < y2 ? 1 : -1;
+    int err = dx + dy;
+    
+    while (1) {
+        if (x1 >= 0 && x1 < w && y1 >= 0 && y1 < h) {
+            pixels[y1 * w + x1] = color;
+        }
+        if (x1 == x2 && y1 == y2) break;
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x1 += sx; }
+        if (e2 <= dx) { err += dx; y1 += sy; }
+    }
+}
+
+static void draw_results_on_camera(uint8_t *rgb565_buf, int cam_w, int cam_h, fd_result_t *result)
+{
+    if (!result->valid) return;
+    
+    uint16_t *pixels = (uint16_t*)rgb565_buf;
+    
+    for (int k = 0; k < 6; k++) {
+        int x = (int)(result->kpts[k].x * cam_w);
+        int y = (int)(result->kpts[k].y * cam_h);
+        draw_point(pixels, x, y, cam_w, cam_h, KPT_COLORS[k], 3);
+    }
+    
+    int lx0 = (int)(result->kpts[0].x * cam_w), ly0 = (int)(result->kpts[0].y * cam_h);
+    int lx1 = (int)(result->kpts[2].x * cam_w), ly1 = (int)(result->kpts[2].y * cam_h);
+    int lx2 = (int)(result->kpts[4].x * cam_w), ly2 = (int)(result->kpts[4].y * cam_h);
+    draw_line(pixels, lx0, ly0, lx1, ly1, cam_w, cam_h, 0xFFFF);
+    draw_line(pixels, lx1, ly1, lx2, ly2, cam_w, cam_h, 0xFFFF);
+    
+    int rx0 = (int)(result->kpts[1].x * cam_w), ry0 = (int)(result->kpts[1].y * cam_h);
+    int rx1 = (int)(result->kpts[3].x * cam_w), ry1 = (int)(result->kpts[3].y * cam_h);
+    int rx2 = (int)(result->kpts[5].x * cam_w), ry2 = (int)(result->kpts[5].y * cam_h);
+    draw_line(pixels, rx0, ry0, rx1, ry1, cam_w, cam_h, 0xFFFF);
+    draw_line(pixels, rx1, ry1, rx2, ry2, cam_w, cam_h, 0xFFFF);
+    
+    draw_line(pixels, lx0, ly0, rx0, ry0, cam_w, cam_h, 0xFFE0);
 }
 
 void app_main(void)
@@ -130,72 +212,46 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    ESP_ERROR_CHECK(cam_net_init());
     ESP_ERROR_CHECK(lcd_display_init());
-    // ESP_ERROR_CHECK(net_service_wifi_init());
-    // ESP_ERROR_CHECK(net_service_http_start());
-    
-    if (yolo11_pose_init() != 0) {
+
+    if (fall_detector_init() != 0) {
         ESP_LOGE(TAG, "Model init failed");
         return;
     }
 
-    ESP_LOGI(TAG, "Ready!");
+    ESP_LOGI(TAG, "Ready! Processing static image...");
 
-    int64_t last_time = esp_timer_get_time();
-    int frame_count = 0;
-    int infer_count = 0;
+    // 图片在 Flash 中（const）
+    const uint8_t *rgb_buf = test_image_000000397133_jpg;
+    uint32_t rgb_size = test_image_000000397133_jpg_len;
+
+    // 绘制缓冲区在 PSRAM 中
+    uint8_t *draw_buf = heap_caps_malloc(TEST_IMAGE_WIDTH * TEST_IMAGE_HEIGHT * 2, MALLOC_CAP_SPIRAM);
+    if (!draw_buf) {
+        ESP_LOGE(TAG, "Failed to alloc draw_buf in PSRAM");
+        return;
+    }
 
     while (1) {
-        uint8_t *rgb_buf = NULL;
-        uint32_t rgb_size = 0;
+        // 从 Flash 复制到 PSRAM
+        memcpy(draw_buf, rgb_buf, rgb_size);
 
-        if (cam_net_get_rgb565(&rgb_buf, &rgb_size) == ESP_OK) {
-            
-            // 1. LCD 显示（每帧）
-            lcd_display_camera(rgb_buf, 800, 800);
-            
-            // 2. 每 N 帧推理 1 次，直接传 RGB565
-            if (++s_frame_counter % INFER_EVERY_N_FRAMES == 0) {
-                int num = yolo11_pose_run_rgb565(rgb_buf, 800, 800);
-                infer_count += num;
-                
-                for (int i = 0; i < num; i++) {
-                    yolo11_pose_result_t result;
-                    if (yolo11_pose_get_result(i, &result) == 0) {
-                        ESP_LOGI(TAG, "Person %d: score=%.2f", i, result.score);
-                        
-                        uint8_t *lcd_buf = lcd_display_get_buffer();
-                        if (lcd_buf) {
-                            draw_keypoints_on_lcd(lcd_buf, 1024, 600, &result);
-                        }
-                    }
-                }
-                
-                if (num > 0) {
-                    lcd_display_flush();
-                }
+        fd_result_t result;
+        fall_detector_run(draw_buf, TEST_IMAGE_WIDTH, TEST_IMAGE_HEIGHT, &result);
+        
+        if (result.valid) {
+            ESP_LOGI(TAG, "Detected! score=%.3f", result.person_score);
+            for (int k = 0; k < 6; k++) {
+                ESP_LOGI(TAG, "  Kpt%d: (%.3f, %.3f) conf=%.3f", 
+                         k, result.kpts[k].x, result.kpts[k].y, result.kpts[k].conf);
             }
-            
-            // // 3. JPEG + WiFi
-            // uint8_t *jpeg_buf = NULL;
-            // uint32_t jpeg_size = 0;
-            // if (cam_net_encode_jpeg(rgb_buf, rgb_size, &jpeg_buf, &jpeg_size) == ESP_OK) {
-            //     net_service_jpeg_update(jpeg_buf, jpeg_size);
-            // }
-
-            cam_net_release_rgb565();
-
-            frame_count++;
-            int64_t now = esp_timer_get_time();
-            if (now - last_time >= 1000000) {
-                ESP_LOGI(TAG, "LCD FPS: %d, Inferred: %d persons", frame_count, infer_count);
-                frame_count = 0;
-                infer_count = 0;
-                last_time = now;
-            }
+            draw_results_on_camera(draw_buf, TEST_IMAGE_WIDTH, TEST_IMAGE_HEIGHT, &result);
+        } else {
+            ESP_LOGW(TAG, "No detection");
         }
+        
+        lcd_display_camera(draw_buf, TEST_IMAGE_WIDTH, TEST_IMAGE_HEIGHT);
 
-        vTaskDelay(pdMS_TO_TICKS(1));
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

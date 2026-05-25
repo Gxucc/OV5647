@@ -30,7 +30,7 @@ static uint32_t s_jpeg_out_buf_size = 0;
 
 // 分辨率配置（根据你的实际设置）
 #define CAM_WIDTH   800
-#define CAM_HEIGHT  800
+#define CAM_HEIGHT  640
 
 esp_err_t cam_net_init(void)
 {

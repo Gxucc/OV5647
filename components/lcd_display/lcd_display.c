@@ -105,30 +105,38 @@ void lcd_display_clear(void)
 }
 
 // 居中显示，支持任意分辨率
+// lcd_display.c
 void lcd_display_camera(const uint8_t *rgb565_buf, uint32_t cam_width, uint32_t cam_height)
 {
     if (!s_lcd_buffer || !rgb565_buf) return;
 
-    // 不再全屏 memset！左右黑边在初始化时已是黑色，保持不变
-    // 只更新中间 800x600 区域
-
-    // 计算裁剪参数（800x800 在 1024x600 上：水平居中，垂直裁剪）
-    int src_y_start = (cam_height - LCD_HEIGHT) / 2;  // 100
-    int dst_x_offset = (LCD_WIDTH - cam_width) / 2;     // 112
+    // 800x640 在 1024x600 上：
+    // 水平居中：左右黑边 112px
+    // 垂直裁剪：640 > 600，上下各裁 20px
+    int src_y_start = (cam_height - LCD_HEIGHT) / 2;   // (640 - 600) / 2 = 20
+    int dst_x_offset = (LCD_WIDTH - cam_width) / 2;     // (1024 - 800) / 2 = 112
     
-    // 垂直方向只拷贝 600 行（裁剪掉上下各 100 行）
-    // 水平方向拷贝 800 列，从面板第 112 列开始
+    // 安全边界检查
+    if (cam_width > LCD_WIDTH || cam_height < LCD_HEIGHT) {
+        ESP_LOGW(TAG, "Invalid cam size %dx%d for LCD %dx%d", 
+                 cam_width, cam_height, LCD_WIDTH, LCD_HEIGHT);
+        return;
+    }
+    
     for (int row = 0; row < LCD_HEIGHT; row++) {
+        // 从摄像头缓冲的第 (src_y_start + row) 行读取
         const uint16_t *src = (const uint16_t*)(rgb565_buf + 
                                                 (src_y_start + row) * cam_width * 2);
+        // 写入 LCD 缓冲的第 row 行，水平偏移 dst_x_offset
         uint16_t *dst = (uint16_t*)(s_lcd_buffer + 
                                     row * LCD_WIDTH * 2 + 
                                     dst_x_offset * 2);
-        memcpy(dst, src, cam_width * 2);  // 整行拷贝，800*2=1600 bytes
+        memcpy(dst, src, cam_width * 2);  // 拷贝 800*2 = 1600 bytes
     }
 
     lcd_display_flush();
 }
+
 void lcd_display_flush(void)
 {
     if (s_lcd_buffer && s_lcd_panel) {
