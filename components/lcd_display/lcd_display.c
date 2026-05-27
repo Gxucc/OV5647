@@ -14,8 +14,6 @@
 
 static const char *TAG = "lcd_display";
 
-#define LCD_WIDTH           1024
-#define LCD_HEIGHT          600
 #define LCD_RST_GPIO        27
 #define LCD_BL_GPIO         26
 #define LCD_BPP             16  // RGB565
@@ -70,7 +68,7 @@ esp_err_t lcd_display_init(void)
     ESP_ERROR_CHECK(esp_lcd_panel_init(s_lcd_panel));
     ESP_LOGI(TAG, "EK79007 panel initialized");
 
-    // 在 lcd_display_init() 末尾，panel init 之后
+    // 启用 2D-DMA 加速
     ESP_ERROR_CHECK(esp_lcd_dpi_panel_enable_dma2d(s_lcd_panel));
     ESP_LOGI(TAG, "2D-DMA enabled for LCD");
 
@@ -104,35 +102,22 @@ void lcd_display_clear(void)
     }
 }
 
-// 居中显示，支持任意分辨率
-// lcd_display.c
+// 1:1 全屏显示，摄像头 1024x600 与 LCD 分辨率完全匹配
 void lcd_display_camera(const uint8_t *rgb565_buf, uint32_t cam_width, uint32_t cam_height)
 {
     if (!s_lcd_buffer || !rgb565_buf) return;
 
-    // 800x640 在 1024x600 上：
-    // 水平居中：左右黑边 112px
-    // 垂直裁剪：640 > 600，上下各裁 20px
-    int src_y_start = (cam_height - LCD_HEIGHT) / 2;   // (640 - 600) / 2 = 20
-    int dst_x_offset = (LCD_WIDTH - cam_width) / 2;     // (1024 - 800) / 2 = 112
-    
-    // 安全边界检查
-    if (cam_width > LCD_WIDTH || cam_height < LCD_HEIGHT) {
-        ESP_LOGW(TAG, "Invalid cam size %dx%d for LCD %dx%d", 
+    // 分辨率必须严格匹配
+    if (cam_width != LCD_WIDTH || cam_height != LCD_HEIGHT) {
+        ESP_LOGW(TAG, "Camera size %dx%d != LCD %dx%d, copy anyway", 
                  cam_width, cam_height, LCD_WIDTH, LCD_HEIGHT);
-        return;
+        // 仍然可以拷贝，但只拷贝重叠部分
     }
     
-    for (int row = 0; row < LCD_HEIGHT; row++) {
-        // 从摄像头缓冲的第 (src_y_start + row) 行读取
-        const uint16_t *src = (const uint16_t*)(rgb565_buf + 
-                                                (src_y_start + row) * cam_width * 2);
-        // 写入 LCD 缓冲的第 row 行，水平偏移 dst_x_offset
-        uint16_t *dst = (uint16_t*)(s_lcd_buffer + 
-                                    row * LCD_WIDTH * 2 + 
-                                    dst_x_offset * 2);
-        memcpy(dst, src, cam_width * 2);  // 拷贝 800*2 = 1600 bytes
-    }
+    // 直接整帧 memcpy，无需偏移或裁剪
+    uint32_t copy_bytes = (cam_width < LCD_WIDTH ? cam_width : LCD_WIDTH) * 
+                          (cam_height < LCD_HEIGHT ? cam_height : LCD_HEIGHT) * 2;
+    memcpy(s_lcd_buffer, rgb565_buf, copy_bytes);
 
     lcd_display_flush();
 }

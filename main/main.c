@@ -1,255 +1,88 @@
-// #include <stdio.h>
-// #include <string.h>
-// #include "freertos/FreeRTOS.h"
-// #include "freertos/task.h"
-// #include "esp_log.h"
-// #include "esp_err.h"
-// #include "esp_timer.h"
-// #include "nvs_flash.h"
-// #include "cam_net.h"
-// #include "lcd_display.h"
-// #include "fall_detector.h"
-
-// static const char *TAG = "main";
-
-// static const uint16_t KPT_COLORS[6] = {
-//     0xF800, 0xF800, 0x07E0, 0x07E0, 0x001F, 0x001F
-// };
-
-// static void draw_point(uint16_t *pixels, int x, int y, int w, int h, uint16_t color, int size)
-// {
-//     for (int dy = -size; dy <= size; dy++) {
-//         for (int dx = -size; dx <= size; dx++) {
-//             int px = x + dx;
-//             int py = y + dy;
-//             if (px >= 0 && px < w && py >= 0 && py < h) {
-//                 pixels[py * w + px] = color;
-//             }
-//         }
-//     }
-// }
-
-// static void draw_line(uint16_t *pixels, int x1, int y1, int x2, int y2, int w, int h, uint16_t color)
-// {
-//     int dx = abs(x2 - x1), sx = x1 < x2 ? 1 : -1;
-//     int dy = -abs(y2 - y1), sy = y1 < y2 ? 1 : -1;
-//     int err = dx + dy;
-    
-//     while (1) {
-//         if (x1 >= 0 && x1 < w && y1 >= 0 && y1 < h) {
-//             pixels[y1 * w + x1] = color;
-//         }
-//         if (x1 == x2 && y1 == y2) break;
-//         int e2 = 2 * err;
-//         if (e2 >= dy) { err += dy; x1 += sx; }
-//         if (e2 <= dx) { err += dx; y1 += sy; }
-//     }
-// }
-
-// static void draw_results_on_camera(uint8_t *rgb565_buf, int cam_w, int cam_h, fd_result_t *result)
-// {
-//     if (!result->valid) return;
-    
-//     uint16_t *pixels = (uint16_t*)rgb565_buf;
-    
-//     for (int k = 0; k < 6; k++) {
-//         int x = (int)(result->kpts[k].x * cam_w);
-//         int y = (int)(result->kpts[k].y * cam_h);
-//         draw_point(pixels, x, y, cam_w, cam_h, KPT_COLORS[k], 3);
-//     }
-    
-//     int lx0 = (int)(result->kpts[0].x * cam_w), ly0 = (int)(result->kpts[0].y * cam_h);
-//     int lx1 = (int)(result->kpts[2].x * cam_w), ly1 = (int)(result->kpts[2].y * cam_h);
-//     int lx2 = (int)(result->kpts[4].x * cam_w), ly2 = (int)(result->kpts[4].y * cam_h);
-//     draw_line(pixels, lx0, ly0, lx1, ly1, cam_w, cam_h, 0xFFFF);
-//     draw_line(pixels, lx1, ly1, lx2, ly2, cam_w, cam_h, 0xFFFF);
-    
-//     int rx0 = (int)(result->kpts[1].x * cam_w), ry0 = (int)(result->kpts[1].y * cam_h);
-//     int rx1 = (int)(result->kpts[3].x * cam_w), ry1 = (int)(result->kpts[3].y * cam_h);
-//     int rx2 = (int)(result->kpts[5].x * cam_w), ry2 = (int)(result->kpts[5].y * cam_h);
-//     draw_line(pixels, rx0, ry0, rx1, ry1, cam_w, cam_h, 0xFFFF);
-//     draw_line(pixels, rx1, ry1, rx2, ry2, cam_w, cam_h, 0xFFFF);
-    
-//     draw_line(pixels, lx0, ly0, rx0, ry0, cam_w, cam_h, 0xFFE0);
-// }
-
-// void app_main(void)
-// {
-//     ESP_LOGI(TAG, "App start");
-
-//     esp_err_t ret = nvs_flash_init();
-//     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-//         ESP_ERROR_CHECK(nvs_flash_erase());
-//         ret = nvs_flash_init();
-//     }
-//     ESP_ERROR_CHECK(ret);
-
-//     ESP_ERROR_CHECK(cam_net_init());
-//     ESP_ERROR_CHECK(lcd_display_init());
-
-//     if (fall_detector_init() != 0) {
-//         ESP_LOGE(TAG, "Model init failed");
-//         return;
-//     }
-
-//     ESP_LOGI(TAG, "Ready!");
-
-//     int64_t last_time = esp_timer_get_time();
-//     int frame_count = 0;
-
-//     while (1) {
-//         uint8_t *rgb_buf = NULL;
-//         uint32_t rgb_size = 0;
-
-//         if (cam_net_get_rgb565(&rgb_buf, &rgb_size) == ESP_OK) {
-//             fd_result_t result;
-//             //fall_detector_run(rgb_buf, 800, 640, &result);
-            
-//             if (result.valid) {
-//               //  draw_results_on_camera(rgb_buf, 800, 640, &result);
-//             }
-            
-//             lcd_display_camera(rgb_buf, 800, 640);
-
-//             cam_net_release_rgb565();
-
-//             frame_count++;
-//             int64_t now = esp_timer_get_time();
-//             if (now - last_time >= 1000000) {
-//                 ESP_LOGI(TAG, "FPS: %d", frame_count);
-//                 frame_count = 0;
-//                 last_time = now;
-//             }
-//         }
-
-//         vTaskDelay(pdMS_TO_TICKS(1));
-//     }
-// }
-#include <stdio.h>
-#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
-#include "esp_err.h"
-#include "esp_timer.h"
-#include "nvs_flash.h"
-#include "esp_heap_caps.h"
-#include "lcd_display.h"
-#include "fall_detector.h"
-#include "test_image.h"
+#include "cam_net.h"
+#include "lcd_display.h"   // 这里已经包含了 LCD_WIDTH / LCD_HEIGHT
+#include "person_detect.h"
+#include "draw_box.h"
 
 static const char *TAG = "main";
 
-static const uint16_t KPT_COLORS[6] = {
-    0xF800, 0xF800, 0x07E0, 0x07E0, 0x001F, 0x001F
-};
+#define CAM_WIDTH   1024
+#define CAM_HEIGHT  600
 
-static void draw_point(uint16_t *pixels, int x, int y, int w, int h, uint16_t color, int size)
+void draw_reference_cross(uint8_t *buf, int buf_w, int buf_h)
 {
-    for (int dy = -size; dy <= size; dy++) {
-        for (int dx = -size; dx <= size; dx++) {
-            int px = x + dx;
-            int py = y + dy;
-            if (px >= 0 && px < w && py >= 0 && py < h) {
-                pixels[py * w + px] = color;
-            }
-        }
-    }
-}
+    uint16_t *pixel_buf = (uint16_t *)buf;
+    int cx = buf_w / 2;
+    int cy = buf_h / 2;
+    int size = 50;
+    uint16_t color_green = 0x07E0;
 
-static void draw_line(uint16_t *pixels, int x1, int y1, int x2, int y2, int w, int h, uint16_t color)
-{
-    int dx = abs(x2 - x1), sx = x1 < x2 ? 1 : -1;
-    int dy = -abs(y2 - y1), sy = y1 < y2 ? 1 : -1;
-    int err = dx + dy;
-    
-    while (1) {
-        if (x1 >= 0 && x1 < w && y1 >= 0 && y1 < h) {
-            pixels[y1 * w + x1] = color;
-        }
-        if (x1 == x2 && y1 == y2) break;
-        int e2 = 2 * err;
-        if (e2 >= dy) { err += dy; x1 += sx; }
-        if (e2 <= dx) { err += dx; y1 += sy; }
+    for (int x = cx - size; x <= cx + size; x++) {
+        if (x >= 0 && x < buf_w) pixel_buf[cy * buf_w + x] = color_green;
     }
-}
+    for (int y = cy - size; y <= cy + size; y++) {
+        if (y >= 0 && y < buf_h) pixel_buf[y * buf_w + cx] = color_green;
+    }
 
-static void draw_results_on_camera(uint8_t *rgb565_buf, int cam_w, int cam_h, fd_result_t *result)
-{
-    if (!result->valid) return;
-    
-    uint16_t *pixels = (uint16_t*)rgb565_buf;
-    
-    for (int k = 0; k < 6; k++) {
-        int x = (int)(result->kpts[k].x * cam_w);
-        int y = (int)(result->kpts[k].y * cam_h);
-        draw_point(pixels, x, y, cam_w, cam_h, KPT_COLORS[k], 3);
+    int margin = 30;
+    uint16_t color_blue = 0x001F, color_red = 0xF800;
+    uint16_t color_yellow = 0xFFE0, color_cyan = 0x07FF;
+
+    for (int i = 0; i < 20; i++) {
+        pixel_buf[margin * buf_w + (margin + i)] = color_blue;
+        pixel_buf[(margin + i) * buf_w + margin] = color_blue;
+        pixel_buf[margin * buf_w + (buf_w - margin - i)] = color_yellow;
+        pixel_buf[(margin + i) * buf_w + (buf_w - margin)] = color_yellow;
+        pixel_buf[(buf_h - margin) * buf_w + (margin + i)] = color_cyan;
+        pixel_buf[(buf_h - margin - i) * buf_w + margin] = color_cyan;
+        pixel_buf[(buf_h - margin) * buf_w + (buf_w - margin - i)] = color_red;
+        pixel_buf[(buf_h - margin - i) * buf_w + (buf_w - margin)] = color_red;
     }
-    
-    int lx0 = (int)(result->kpts[0].x * cam_w), ly0 = (int)(result->kpts[0].y * cam_h);
-    int lx1 = (int)(result->kpts[2].x * cam_w), ly1 = (int)(result->kpts[2].y * cam_h);
-    int lx2 = (int)(result->kpts[4].x * cam_w), ly2 = (int)(result->kpts[4].y * cam_h);
-    draw_line(pixels, lx0, ly0, lx1, ly1, cam_w, cam_h, 0xFFFF);
-    draw_line(pixels, lx1, ly1, lx2, ly2, cam_w, cam_h, 0xFFFF);
-    
-    int rx0 = (int)(result->kpts[1].x * cam_w), ry0 = (int)(result->kpts[1].y * cam_h);
-    int rx1 = (int)(result->kpts[3].x * cam_w), ry1 = (int)(result->kpts[3].y * cam_h);
-    int rx2 = (int)(result->kpts[5].x * cam_w), ry2 = (int)(result->kpts[5].y * cam_h);
-    draw_line(pixels, rx0, ry0, rx1, ry1, cam_w, cam_h, 0xFFFF);
-    draw_line(pixels, rx1, ry1, rx2, ry2, cam_w, cam_h, 0xFFFF);
-    
-    draw_line(pixels, lx0, ly0, rx0, ry0, cam_w, cam_h, 0xFFE0);
 }
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "App start");
-
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
-
     ESP_ERROR_CHECK(lcd_display_init());
+    ESP_ERROR_CHECK(cam_net_init());
+    ESP_ERROR_CHECK(person_detect_init());
 
-    if (fall_detector_init() != 0) {
-        ESP_LOGE(TAG, "Model init failed");
-        return;
-    }
-
-    ESP_LOGI(TAG, "Ready! Processing static image...");
-
-    // 使用固定变量名
-    const uint8_t *rgb_buf = test_image;
-    uint32_t rgb_size = test_image_len;
-
-    uint8_t *draw_buf = heap_caps_malloc(TEST_IMAGE_WIDTH * TEST_IMAGE_HEIGHT * 2, MALLOC_CAP_SPIRAM);
-    if (!draw_buf) {
-        ESP_LOGE(TAG, "Failed to alloc draw_buf in PSRAM");
-        return;
-    }
+    ESP_LOGI(TAG, "All modules initialized, entering main loop");
 
     while (1) {
-        memcpy(draw_buf, rgb_buf, rgb_size);
+        uint8_t *rgb_buf = NULL;
+        uint32_t rgb_size = 0;
 
-        fd_result_t result;
-        fall_detector_run(draw_buf, TEST_IMAGE_WIDTH, TEST_IMAGE_HEIGHT, &result);
-        
-        if (result.valid) {
-            ESP_LOGI(TAG, "Detected! score=%.3f", result.person_score);
-            for (int k = 0; k < 6; k++) {
-                ESP_LOGI(TAG, "  Kpt%d: (%.3f, %.3f) conf=%.3f", 
-                         k, result.kpts[k].x, result.kpts[k].y, result.kpts[k].conf);
-            }
-            draw_results_on_camera(draw_buf, TEST_IMAGE_WIDTH, TEST_IMAGE_HEIGHT, &result);
-        } else {
-            ESP_LOGW(TAG, "No detection");
+        if (cam_net_get_rgb565(&rgb_buf, &rgb_size) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to get frame");
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
         }
-        
-        lcd_display_camera(draw_buf, TEST_IMAGE_WIDTH, TEST_IMAGE_HEIGHT);
 
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        lcd_display_camera(rgb_buf, CAM_WIDTH, CAM_HEIGHT);
+
+        person_box_t box;
+        bool detected = person_detect_run(rgb_buf, CAM_WIDTH, CAM_HEIGHT, &box);
+
+        uint8_t *lcd_buf = lcd_display_get_buffer();
+        draw_reference_cross(lcd_buf, LCD_WIDTH, LCD_HEIGHT);
+
+        if (detected) {
+            draw_box_on_lcd(lcd_buf, LCD_WIDTH, LCD_HEIGHT, &box, CAM_WIDTH, CAM_HEIGHT);
+
+            // 修正：直接使用 lcd_buf，不要重复声明 pixel_buf
+            uint16_t *pixels = (uint16_t *)lcd_buf;
+            int center_x = box.x + box.width / 2;
+            int center_y = box.y + box.height / 2;
+
+            if (center_x >= 0 && center_x < LCD_WIDTH && center_y >= 0 && center_y < LCD_HEIGHT) {
+                pixels[center_y * LCD_WIDTH + center_x] = 0xFFFF;
+            }
+        }
+
+        lcd_display_flush();
+        cam_net_release_rgb565();
+        vTaskDelay(pdMS_TO_TICKS(30));
     }
 }

@@ -1,3 +1,4 @@
+// fall_detector.cpp
 #include "fall_detector.h"
 #include "esp_log.h"
 #include "dl_model_base.hpp"
@@ -25,6 +26,17 @@ static const float PREPROCESS_STD[3] = {1.0f, 1.0f, 1.0f};
 
 static const int STRIDES[3] = {8, 16, 32};
 static const int GRID_SIZES[3][2] = {{24, 24}, {12, 12}, {6, 6}};
+
+// ========== 用时统计结构 ==========
+typedef struct {
+    int64_t preprocess_us;
+    int64_t model_run_us;
+    int64_t decode_us;
+    int64_t nms_us;
+    int64_t total_us;
+} timing_info_t;
+
+static timing_info_t s_timing = {0, 0, 0, 0, 0};
 
 extern "C" {
 
@@ -58,6 +70,8 @@ int fall_detector_init(void)
 static void manual_preprocess(const uint8_t *rgb565_src, int src_w, int src_h, 
                               int8_t *dst, int dst_w, int dst_h)
 {
+    int64_t t_start = esp_timer_get_time();
+    
     float scale_x = (float)src_w / dst_w;
     float scale_y = (float)src_h / dst_h;
     
@@ -90,6 +104,8 @@ static void manual_preprocess(const uint8_t *rgb565_src, int src_w, int src_h,
             dst[dst_idx + 2] = (int8_t)DL_CLIP(bq, DL_QUANT8_MIN, DL_QUANT8_MAX);
         }
     }
+    
+    s_timing.preprocess_us = esp_timer_get_time() - t_start;
 }
 
 static void make_anchors(int stride, int grid_w, int grid_h, 
@@ -125,7 +141,7 @@ static void decode_scale(int8_t *box_data, int8_t *score_data, int8_t *kpt_data,
     make_anchors(stride, grid_w, grid_h, anchors_x, anchors_y);
     
     int offset = stride / 2;
-    int reg_max = 16;  // YOLO11 DFL bins
+    int reg_max = 16;
     
     for (int i = 0; i < num_grid; i++) {
         if (*num_dets >= max_dets) break;
@@ -133,7 +149,6 @@ static void decode_scale(int8_t *box_data, int8_t *score_data, int8_t *kpt_data,
         float cls_score = sigmoid(dl::dequantize(score_data[i], score_scale));
         if (cls_score < CONF_THRESHOLD) continue;
         
-        // 解码 box（简化版，用中心点近似）
         float dx = sigmoid(dl::dequantize(box_data[i * 64 + 0], box_scale)) * 2.0f - 0.5f;
         float dy = sigmoid(dl::dequantize(box_data[i * 64 + 1], box_scale)) * 2.0f - 0.5f;
         float dw = sigmoid(dl::dequantize(box_data[i * 64 + 2], box_scale)) * 2.0f;
@@ -152,18 +167,15 @@ static void decode_scale(int8_t *box_data, int8_t *score_data, int8_t *kpt_data,
         float x2 = cx + w / 2.0f;
         float y2 = cy + h / 2.0f;
         
-        // 解码关键点 - 官方公式
         float kpts[NUM_TOTAL_KPTS * 3];
         for (int k = 0; k < NUM_TOTAL_KPTS; k++) {
             float kpt_x = dl::dequantize(kpt_data[i * 51 + k * 3], kpt_scale);
             float kpt_y = dl::dequantize(kpt_data[i * 51 + k * 3 + 1], kpt_scale);
             float kpt_conf = dl::dequantize(kpt_data[i * 51 + k * 3 + 2], kpt_scale);
             
-            // 官方公式：kpt_x * 2.0 * stride + (center_x - offset)
             float abs_kx = kpt_x * 2.0f * stride + (center_x - offset);
             float abs_ky = kpt_y * 2.0f * stride + (center_y - offset);
             
-            // 归一化到 0-1
             kpts[k * 3] = fmaxf(0, fminf(1, abs_kx / MODEL_INPUT_W));
             kpts[k * 3 + 1] = fmaxf(0, fminf(1, abs_ky / MODEL_INPUT_H));
             kpts[k * 3 + 2] = sigmoid(kpt_conf);
@@ -248,6 +260,7 @@ int fall_detector_run(const uint8_t *rgb565_buf, int src_w, int src_h, fd_result
         return -1;
     }
 
+    int64_t t_total_start = esp_timer_get_time();
     memset(out, 0, sizeof(fd_result_t));
 
     dl::TensorBase *input = s_model->get_input();
@@ -255,7 +268,10 @@ int fall_detector_run(const uint8_t *rgb565_buf, int src_w, int src_h, fd_result
     
     manual_preprocess(rgb565_buf, src_w, src_h, input_data, MODEL_INPUT_W, MODEL_INPUT_H);
     
+    // ========== 模型推理计时 ==========
+    int64_t t_model_start = esp_timer_get_time();
     s_model->run(input);
+    s_timing.model_run_us = esp_timer_get_time() - t_model_start;
 
     std::map<std::string, dl::TensorBase*> outputs = s_model->get_outputs();
     if (outputs.size() < 9) {
@@ -293,17 +309,9 @@ int fall_detector_run(const uint8_t *rgb565_buf, int src_w, int src_h, fd_result
         }
     }
 
-    // ========== 调试打印原始值（在 box_data 定义之后） ==========
-    ESP_LOGI(TAG, "=== RAW DEBUG ===");
-    ESP_LOGI(TAG, "box0[0] dx_raw=%.4f dy_raw=%.4f", 
-             dl::dequantize(box_data[0][0], box_scale),
-             dl::dequantize(box_data[0][1], box_scale));
-    ESP_LOGI(TAG, "kpt0[11] x_raw=%.4f y_raw=%.4f v_raw=%.4f",
-             dl::dequantize(kpt_data[0][11*3], kpt_scale),
-             dl::dequantize(kpt_data[0][11*3+1], kpt_scale),
-             dl::dequantize(kpt_data[0][11*3+2], kpt_scale));
-    ESP_LOGI(TAG, "=================");
-
+    // ========== 解码计时 ==========
+    int64_t t_decode_start = esp_timer_get_time();
+    
     float *detections = (float*)heap_caps_malloc(100 * (6 + NUM_TOTAL_KPTS * 3) * sizeof(float), MALLOC_CAP_SPIRAM);
     if (!detections) {
         ESP_LOGE(TAG, "Failed to alloc detections");
@@ -321,8 +329,20 @@ int fall_detector_run(const uint8_t *rgb565_buf, int src_w, int src_h, fd_result
     if (num_dets == 0) {
         out->valid = 0;
         free(detections);
+        
+        s_timing.decode_us = esp_timer_get_time() - t_decode_start;
+        s_timing.nms_us = 0;
+        s_timing.total_us = esp_timer_get_time() - t_total_start;
+        
+        // 打印用时统计
+        ESP_LOGI(TAG, "[TIMING] pre=%lld, model=%lld, decode=%lld, nms=%lld, total=%lld us",
+                 s_timing.preprocess_us, s_timing.model_run_us, s_timing.decode_us, 
+                 s_timing.nms_us, s_timing.total_us);
         return 0;
     }
+    
+    // ========== NMS 计时 ==========
+    int64_t t_nms_start = esp_timer_get_time();
     
     bool *suppressed = (bool*)heap_caps_calloc(100, sizeof(bool), MALLOC_CAP_SPIRAM);
     if (!suppressed) {
@@ -332,19 +352,26 @@ int fall_detector_run(const uint8_t *rgb565_buf, int src_w, int src_h, fd_result
     nms(detections, &num_dets, 0.5f);
     free(suppressed);
     
+    s_timing.nms_us = esp_timer_get_time() - t_nms_start;
+    s_timing.decode_us = t_nms_start - t_decode_start;  // decode 包含到 NMS 前
+    
     if (num_dets == 0) {
         out->valid = 0;
         free(detections);
+        
+        s_timing.total_us = esp_timer_get_time() - t_total_start;
+        ESP_LOGI(TAG, "[TIMING] pre=%lld, model=%lld, decode=%lld, nms=%lld, total=%lld us",
+                 s_timing.preprocess_us, s_timing.model_run_us, s_timing.decode_us, 
+                 s_timing.nms_us, s_timing.total_us);
         return 0;
     }
     
-     out->valid = 1;
+    out->valid = 1;
     out->person_score = detections[4];
     
     float *best_kpts = &detections[6];
     int kpt_indices[NUM_KEYPOINTS] = {11, 12, 13, 14, 15, 16};
     
-    // 计算 letterbox 参数（与预处理一致）
     float scale = fminf((float)MODEL_INPUT_W / src_w, (float)MODEL_INPUT_H / src_h);
     int new_w = (int)(src_w * scale);
     int new_h = (int)(src_h * scale);
@@ -356,7 +383,6 @@ int fall_detector_run(const uint8_t *rgb565_buf, int src_w, int src_h, fd_result
         float raw_x = best_kpts[idx * 3];
         float raw_y = best_kpts[idx * 3 + 1];
         
-        // 补偿 letterbox 边框，转换到原图比例
         float valid_x = (raw_x * MODEL_INPUT_W - pad_x) / new_w;
         float valid_y = (raw_y * MODEL_INPUT_H - pad_y) / new_h;
         
@@ -365,12 +391,20 @@ int fall_detector_run(const uint8_t *rgb565_buf, int src_w, int src_h, fd_result
         out->kpts[k].conf = best_kpts[idx * 3 + 2];
     }
 
+    free(detections);
+    
+    s_timing.total_us = esp_timer_get_time() - t_total_start;
+    
+    // ========== 打印用时统计 ==========
+    ESP_LOGI(TAG, "[TIMING] pre=%lld, model=%lld, decode=%lld, nms=%lld, total=%lld us",
+             s_timing.preprocess_us, s_timing.model_run_us, s_timing.decode_us, 
+             s_timing.nms_us, s_timing.total_us);
+
     ESP_LOGI(TAG, "Detected: score=%.3f, num_dets=%d", out->person_score, num_dets);
     for (int k = 0; k < NUM_KEYPOINTS; k++) {
         ESP_LOGI(TAG, "  Kpt%d: (%.3f, %.3f) conf=%.3f", k, out->kpts[k].x, out->kpts[k].y, out->kpts[k].conf);
     }
 
-    free(detections);
     return 0;
 }
 

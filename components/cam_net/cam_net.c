@@ -7,14 +7,15 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_video_device.h"
 #include "esp_video_init.h"
 #include "linux/videodev2.h"
 #include "driver/jpeg_encode.h"
-#include "esp_video_isp_ioctl.h"   // ← 新增
+#include "esp_video_isp_ioctl.h"
+
 
 static const char *TAG = "cam_net";
-static int s_fd_isp = -1;          // ← 新增
 
 #define CAM_DEV_NAME    ESP_VIDEO_MIPI_CSI_DEVICE_NAME
 #define BUFFER_COUNT    2
@@ -28,13 +29,40 @@ static jpeg_encoder_handle_t s_jpeg_enc = NULL;
 static uint8_t *s_jpeg_out_buf = NULL;
 static uint32_t s_jpeg_out_buf_size = 0;
 
-// 分辨率配置（根据你的实际设置）
-#define CAM_WIDTH   800
-#define CAM_HEIGHT  640
+// 分辨率配置：1024x600（与 LCD 同分辨率，无需裁剪/缩放）
+#define CAM_WIDTH   1024
+#define CAM_HEIGHT  600
+
+// ISP 控制句柄
+static int s_fd_isp = -1;
+
+// 内部辅助：设置单个扩展控制
+static esp_err_t isp_set_ext_ctrl(int fd, uint32_t id, int32_t val)
+{
+    if (fd < 0) {
+        return ESP_FAIL;
+    }
+
+    struct v4l2_ext_control ctrl = {0};
+    ctrl.id = id;
+    ctrl.value = val;
+
+    struct v4l2_ext_controls ctrls = {0};
+    ctrls.count = 1;
+    ctrls.controls = &ctrl;
+
+    if (ioctl(fd, VIDIOC_S_EXT_CTRLS, &ctrls) < 0) {
+        ESP_LOGE(TAG, "ISP set ctrl 0x%08X=%d failed", id, val);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "ISP ctrl 0x%08X set to %d", id, val);
+    return ESP_OK;
+}
 
 esp_err_t cam_net_init(void)
 {
-    // 1. 初始化 esp_video 系统
+    // 1. 初始化 esp_video 系统（SC2336 使用 MIPI-CSI 2 lane）
     const esp_video_init_csi_config_t csi_config = {
         .sccb_config = {
             .init_sccb = true,
@@ -43,9 +71,9 @@ esp_err_t cam_net_init(void)
                 .scl_pin = 8,
                 .sda_pin = 7,
             },
-            .freq = 100000,
+            .freq = 100000,  // SC2336 SCCB 支持 100KHz
         },
-        .reset_pin = -1,
+        .reset_pin = -1,   // 使用软复位，硬件 RST 引脚未接或-1
         .pwdn_pin = -1,
     };
 
@@ -54,7 +82,7 @@ esp_err_t cam_net_init(void)
     };
 
     ESP_ERROR_CHECK(esp_video_init(&cam_config));
-    ESP_LOGI(TAG, "esp_video init done");
+    ESP_LOGI(TAG, "esp_video init done (SC2336)");
 
     // 2. 打开视频设备
     s_fd = open(CAM_DEV_NAME, O_RDWR);
@@ -64,7 +92,7 @@ esp_err_t cam_net_init(void)
     }
     ESP_LOGI(TAG, "Opened %s", CAM_DEV_NAME);
 
-    // 3. 设置格式：ISP 输出 RGB565
+    // 3. 设置格式：ISP 输出 RGB565，1024x600
     struct v4l2_format fmt = {0};
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     fmt.fmt.pix.width = CAM_WIDTH;
@@ -76,7 +104,10 @@ esp_err_t cam_net_init(void)
         ESP_LOGE(TAG, "Failed to set format");
         return ESP_FAIL;
     }
-    ESP_LOGI(TAG, "Format set: %dx%d RGB565", fmt.fmt.pix.width, fmt.fmt.pix.height);
+    
+    // 确认实际设置的分辨率（驱动可能会调整）
+    ESP_LOGI(TAG, "Format set: %dx%d RGB565 (requested %dx%d)", 
+             fmt.fmt.pix.width, fmt.fmt.pix.height, CAM_WIDTH, CAM_HEIGHT);
 
     // 4. 申请帧缓冲
     struct v4l2_requestbuffers req = {0};
@@ -118,14 +149,14 @@ esp_err_t cam_net_init(void)
     }
     ESP_LOGI(TAG, "Stream started");
 
-    // === 新增：ISP 亮度控制 ===
+    // === ISP 亮度/对比度/饱和度控制 ===
     s_fd_isp = open(ESP_VIDEO_ISP1_DEVICE_NAME, O_RDWR);
     if (s_fd_isp < 0) {
         ESP_LOGW(TAG, "ISP device open failed");
     } else {
-        cam_net_isp_set_brightness(25);//设置亮度
-        cam_net_isp_set_contrast(250);//设置对比度
-        cam_net_isp_set_saturation(250);//设置饱和度
+        cam_net_isp_set_brightness(0);     // 亮度：-128 ~ 127
+        cam_net_isp_set_contrast(128);       // 对比度：0 ~ 255，默认128
+        cam_net_isp_set_saturation(128);     // 饱和度：0 ~ 255，默认128
     }
 
     // 6. 初始化 JPEG 硬件编码器
@@ -135,11 +166,11 @@ esp_err_t cam_net_init(void)
     };
     ESP_ERROR_CHECK(jpeg_new_encoder_engine(&engine_cfg, &s_jpeg_enc));
 
-    // 7. 分配 JPEG 输出缓冲区（对齐内存）
-    // RGB565 一帧大小 = width * height * 2
-    // JPEG 压缩后大约 1/10 ~ 1/20，留足余量用 1/5
+    // 7. 分配 JPEG 输出缓冲区
+    // RGB565 一帧 = 1024 * 600 * 2 = 1,228,800 bytes
+    // JPEG 压缩后约 1/10 ~ 1/20，留余量用 1/5
     uint32_t raw_size = CAM_WIDTH * CAM_HEIGHT * 2;
-    s_jpeg_out_buf_size = raw_size / 5;  // 保守估计
+    s_jpeg_out_buf_size = raw_size / 5;  // ~245KB
     
     jpeg_encode_memory_alloc_cfg_t mem_cfg = {
         .buffer_direction = JPEG_ENC_ALLOC_OUTPUT_BUFFER,
@@ -151,7 +182,7 @@ esp_err_t cam_net_init(void)
         ESP_LOGE(TAG, "Failed to alloc JPEG output buffer");
         return ESP_FAIL;
     }
-    s_jpeg_out_buf_size = allocated_size;  // 用实际分配的大小
+    s_jpeg_out_buf_size = allocated_size;
     ESP_LOGI(TAG, "JPEG encoder ready, output buf: %u bytes", s_jpeg_out_buf_size);
 
     return ESP_OK;
@@ -163,16 +194,14 @@ esp_err_t cam_net_get_jpeg(uint8_t **buf, uint32_t *size)
     buf_v4l2.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     buf_v4l2.memory = V4L2_MEMORY_MMAP;
 
-    // 取一帧 RGB565
     if (ioctl(s_fd, VIDIOC_DQBUF, &buf_v4l2) < 0) {
         ESP_LOGE(TAG, "Failed to dequeue buffer");
         return ESP_FAIL;
     }
 
     uint8_t *rgb_buf = s_buffers[buf_v4l2.index];
-    uint32_t rgb_size = buf_v4l2.bytesused;  // 应为 CAM_WIDTH * CAM_HEIGHT * 2
+    uint32_t rgb_size = buf_v4l2.bytesused;
 
-    // 硬件编码配置
     jpeg_encode_cfg_t enc_cfg = {
         .src_type = JPEG_ENCODE_IN_FORMAT_RGB565,
         .sub_sample = JPEG_DOWN_SAMPLING_YUV422,
@@ -189,16 +218,13 @@ esp_err_t cam_net_get_jpeg(uint8_t **buf, uint32_t *size)
                                           &jpeg_size);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "JPEG encode failed: %s", esp_err_to_name(ret));
-        // 编码失败也要归还缓冲
         ioctl(s_fd, VIDIOC_QBUF, &buf_v4l2);
         return ret;
     }
 
     *buf = s_jpeg_out_buf;
     *size = jpeg_size;
-    ESP_LOGD(TAG, "JPEG encoded: %u bytes", jpeg_size);
 
-    // 归还 V4L2 缓冲
     if (ioctl(s_fd, VIDIOC_QBUF, &buf_v4l2) < 0) {
         ESP_LOGE(TAG, "Failed to queue buffer");
         return ESP_FAIL;
@@ -207,42 +233,17 @@ esp_err_t cam_net_get_jpeg(uint8_t **buf, uint32_t *size)
     return ESP_OK;
 }
 
-// 内部辅助：设置单个扩展控制
-static esp_err_t isp_set_ext_ctrl(int fd, uint32_t id, int32_t val)
-{
-    if (fd < 0) {
-        return ESP_FAIL;
-    }
-
-    struct v4l2_ext_control ctrl = {0};
-    ctrl.id = id;
-    ctrl.value = val;
-
-    struct v4l2_ext_controls ctrls = {0};
-    ctrls.count = 1;
-    ctrls.controls = &ctrl;
-
-    if (ioctl(fd, VIDIOC_S_EXT_CTRLS, &ctrls) < 0) {
-        ESP_LOGE(TAG, "ISP set ctrl 0x%08X=%d failed", id, val);
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "ISP ctrl 0x%08X set to %d", id, val);
-    return ESP_OK;
-}
-
-// 公开 API
-// 注意：亮度范围 -128 ~ 127，其他参数范围请参考设备文档
+// ISP 控制 API
 esp_err_t cam_net_isp_set_brightness(int val)
 {
     return isp_set_ext_ctrl(s_fd_isp, V4L2_CID_BRIGHTNESS, val);
 }
-// 注意：对比度范围通常是 0 ~ 255，默认值一般是 128
+
 esp_err_t cam_net_isp_set_contrast(int val)
 {
     return isp_set_ext_ctrl(s_fd_isp, V4L2_CID_CONTRAST, val);
 }
-// 注意：饱和度范围通常是 0 ~ 255，默认值一般是 128
+
 esp_err_t cam_net_isp_set_saturation(int val)
 {
     return isp_set_ext_ctrl(s_fd_isp, V4L2_CID_SATURATION, val);
@@ -288,7 +289,7 @@ esp_err_t cam_net_release_rgb565(void)
     return ESP_OK;
 }
 
-// 从已有的 RGB565 缓冲编码 JPEG，不操作 V4L2
+// 从已有的 RGB565 缓冲编码 JPEG
 esp_err_t cam_net_encode_jpeg(uint8_t *rgb565_buf, uint32_t rgb_size,
                                uint8_t **jpeg_buf, uint32_t *jpeg_size)
 {
@@ -299,7 +300,7 @@ esp_err_t cam_net_encode_jpeg(uint8_t *rgb565_buf, uint32_t rgb_size,
     jpeg_encode_cfg_t enc_cfg = {
         .src_type = JPEG_ENCODE_IN_FORMAT_RGB565,
         .sub_sample = JPEG_DOWN_SAMPLING_YUV422,
-        .image_quality = 45,          // 质量 45，平衡大小和速度
+        .image_quality = 45,
         .width = CAM_WIDTH,
         .height = CAM_HEIGHT,
         .pixel_reverse = false,
