@@ -28,7 +28,7 @@ extern "C" bool person_detect_run(const uint8_t *rgb565_buf, int img_width, int 
         .data = (void *)rgb565_buf,
         .width = (uint16_t)img_width,
         .height = (uint16_t)img_height,
-        .pix_type = dl::image::DL_IMAGE_PIX_TYPE_BGR565LE,  // ← BGR565LE
+        .pix_type = dl::image::DL_IMAGE_PIX_TYPE_RGB565LE,  //必须LE
     };
 
     std::list<dl::detect::result_t> results = s_detector->run(img);
@@ -66,15 +66,8 @@ extern "C" bool person_detect_run(const uint8_t *rgb565_buf, int img_width, int 
     out_box->height = best->box[3];
     out_box->score = best->score;
 
-    ESP_LOGI(TAG, "Selected best: x=%d y=%d w=%d h=%d score=%.2f",
+    ESP_LOGI(TAG, "Selected: x=%d y=%d w=%d h=%d score=%.2f",
              out_box->x, out_box->y, out_box->width, out_box->height, out_box->score);
-    
-    ESP_LOGI(TAG, "Raw: x=%d y=%d w=%d h=%d", best->box[0], best->box[1], best->box[2], best->box[3]);
-    ESP_LOGI(TAG, "Mapped: x1=%d y1=%d x2=%d y2=%d", 
-         best->box[0] + 112, 
-         best->box[1] - 20,
-         best->box[0] + 112 + best->box[2],
-         best->box[1] - 20 + best->box[3]);
 
     return true;
 }
