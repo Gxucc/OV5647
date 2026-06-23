@@ -231,13 +231,13 @@ extern "C" bool fall_classifier_run(const uint8_t *rgb565_buf,
     }
 
     // 打印原始 INT8 输出（调试）
-    ESP_LOGI(TAG, "Raw INT8 output: [%d, %d], exponent: %d",
-             output_data[0], output_data[1], output_exponent);
+    // ESP_LOGI(TAG, "Raw INT8 output: [%d, %d], exponent: %d",
+    //          output_data[0], output_data[1], output_exponent);
 
     float fall_logit = (float)output_data[0] * std::pow(2.0f, (float)output_exponent);
     float normal_logit = (float)output_data[1] * std::pow(2.0f, (float)output_exponent);
 
-    ESP_LOGI(TAG, "Dequantized logits: [%.3f, %.3f]", fall_logit, normal_logit);
+    // ESP_LOGI(TAG, "Dequantized logits: [%.3f, %.3f]", fall_logit, normal_logit);
 
     float max_val = std::max(fall_logit, normal_logit);
     float exp_fall = std::exp(fall_logit - max_val);

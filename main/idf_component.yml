@@ -23,4 +23,5 @@ dependencies:
 
   espressif/pedestrian_detect: ^0.3.0
 
-  espressif/esp-nn: ^1.2.3
+  espressif/esp_lvgl_adapter: ^0.5.2
+  espressif/esp_lcd_touch_gt911: ^1.2.0~2

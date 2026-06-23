@@ -10,4 +10,5 @@ idf_component_register(
     esp_driver_gpio heap 
     esp_mm 
     log 
+    esp_lvgl_adapter
     )

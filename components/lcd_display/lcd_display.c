@@ -11,6 +11,10 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_ldo_regulator.h"
 
+// 引入 adapter 头文件用于获取缓冲区数量
+#include "esp_lv_adapter.h"
+#include "esp_lv_adapter_display.h"
+
 static const char *TAG = "lcd_display";
 
 #define LCD_RST_GPIO        27
@@ -19,8 +23,12 @@ static const char *TAG = "lcd_display";
 
 static esp_lcd_panel_handle_t s_lcd_panel = NULL;
 static esp_lcd_dsi_bus_handle_t s_dsi_bus = NULL;
-static void *s_fb[2] = {NULL, NULL};
-static int s_draw_idx = 0;
+static esp_lcd_panel_io_handle_t s_mipi_dbi_io = NULL;
+
+// 动态分配帧缓冲指针数组，最大支持 3 个缓冲区
+#define MAX_FB_COUNT 3
+static void *s_fb[MAX_FB_COUNT] = {NULL};
+static uint8_t s_fb_count = 0;
 
 esp_err_t lcd_display_init(void)
 {
@@ -36,10 +44,24 @@ esp_err_t lcd_display_init(void)
     ESP_ERROR_CHECK(esp_lcd_new_dsi_bus(&bus_config, &s_dsi_bus));
     ESP_LOGI(TAG, "MIPI DSI bus initialized");
 
-    esp_lcd_panel_io_handle_t mipi_dbi_io = NULL;
+    s_mipi_dbi_io = NULL;
     esp_lcd_dbi_io_config_t dbi_config = EK79007_PANEL_IO_DBI_CONFIG();
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_dbi(s_dsi_bus, &dbi_config, &mipi_dbi_io));
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_dbi(s_dsi_bus, &dbi_config, &s_mipi_dbi_io));
     ESP_LOGI(TAG, "Panel IO installed");
+
+    // ==== 关键修改：使用 adapter 计算所需的帧缓冲数量 ====
+    // 注意：旋转角度必须与 lvgl_ui.c 中注册显示时使用的角度一致
+    s_fb_count = esp_lv_adapter_get_required_frame_buffer_count(
+        ESP_LV_ADAPTER_TEAR_AVOID_MODE_DEFAULT_RGB,  // 防撕裂模式
+        0                                            // 旋转角度 (0 度)
+    );
+    
+    // 确保缓冲区数量不超过预定义的最大值
+    if (s_fb_count > MAX_FB_COUNT) {
+        ESP_LOGW(TAG, "Required frame buffers (%d) exceed MAX_FB_COUNT (%d), clamping", s_fb_count, MAX_FB_COUNT);
+        s_fb_count = MAX_FB_COUNT;
+    }
+    ESP_LOGI(TAG, "Required frame buffers: %d", s_fb_count);
 
     const esp_lcd_dpi_panel_config_t dpi_config = {
         .virtual_channel = 0,
@@ -48,7 +70,7 @@ esp_err_t lcd_display_init(void)
         .pixel_format = LCD_COLOR_FMT_RGB565,
         .in_color_format = LCD_COLOR_FMT_RGB565,
         .out_color_format = LCD_COLOR_FMT_RGB565,
-        .num_fbs = 2,
+        .num_fbs = s_fb_count,  // 使用动态计算的值
         .video_timing = {
             .h_size = LCD_WIDTH,
             .v_size = LCD_HEIGHT,
@@ -60,7 +82,7 @@ esp_err_t lcd_display_init(void)
             .vsync_pulse_width = 2,
         },
         .flags = {
-            .use_dma2d = 1,
+            .use_dma2d = 0,  //DMA2D
             .disable_lp = 0,
         },
     };
@@ -79,7 +101,7 @@ esp_err_t lcd_display_init(void)
         .vendor_config = &vendor_config,
     };
 
-    ESP_ERROR_CHECK(esp_lcd_new_panel_ek79007(mipi_dbi_io, &panel_config, &s_lcd_panel));
+    ESP_ERROR_CHECK(esp_lcd_new_panel_ek79007(s_mipi_dbi_io, &panel_config, &s_lcd_panel));
     ESP_ERROR_CHECK(esp_lcd_panel_reset(s_lcd_panel));
     ESP_ERROR_CHECK(esp_lcd_panel_init(s_lcd_panel));
     ESP_LOGI(TAG, "EK79007 panel initialized");
@@ -92,10 +114,13 @@ esp_err_t lcd_display_init(void)
     gpio_set_level(LCD_BL_GPIO, 1);
     ESP_LOGI(TAG, "Backlight on");
 
-    ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(s_lcd_panel, 2, &s_fb[0], &s_fb[1]));
-    ESP_LOGI(TAG, "Double buffer acquired from driver");
-
-    s_draw_idx = 0;
+    // 获取所有帧缓冲
+    ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(s_lcd_panel, s_fb_count, s_fb));
+    
+    // 打印每个缓冲区地址用于调试
+    for (int i = 0; i < s_fb_count; i++) {
+        ESP_LOGI(TAG, "Frame buffer %d: %p", i, s_fb[i]);
+    }
 
     return ESP_OK;
 }
@@ -106,52 +131,80 @@ void lcd_display_deinit(void)
         esp_lcd_panel_del(s_lcd_panel);
         s_lcd_panel = NULL;
     }
+
     if (s_dsi_bus) {
         esp_lcd_del_dsi_bus(s_dsi_bus);
         s_dsi_bus = NULL;
     }
-    s_fb[0] = NULL;
-    s_fb[1] = NULL;
+    
+    // 清空帧缓冲指针
+    for (int i = 0; i < MAX_FB_COUNT; i++) {
+        s_fb[i] = NULL;
+    }
+    s_fb_count = 0;
 }
 
 void lcd_display_copy_camera(const uint8_t *rgb565_buf, uint32_t cam_width, uint32_t cam_height)
 {
-    if (!s_fb[s_draw_idx] || !rgb565_buf) return;
+    // 默认使用第一个缓冲区
+    if (!s_fb[0] || !rgb565_buf) return;
 
     uint32_t copy_w = (cam_width < LCD_WIDTH) ? cam_width : LCD_WIDTH;
     uint32_t copy_h = (cam_height < LCD_HEIGHT) ? cam_height : LCD_HEIGHT;
     uint32_t copy_bytes = copy_w * copy_h * 2;
 
-    memcpy(s_fb[s_draw_idx], rgb565_buf, copy_bytes);
+    memcpy(s_fb[0], rgb565_buf, copy_bytes);
 }
 
 uint8_t *lcd_display_get_buffer(void)
 {
-    return (uint8_t *)s_fb[s_draw_idx];
+    // 默认返回第一个缓冲区
+    return (uint8_t *)s_fb[0];
+}
+
+// 新增：获取指定索引的缓冲区
+uint8_t *lcd_display_get_buffer_idx(int idx)
+{
+    if (idx < 0 || idx >= s_fb_count) {
+        return NULL;
+    }
+    return (uint8_t *)s_fb[idx];
+}
+
+// 新增：获取缓冲区数量
+uint8_t lcd_display_get_buffer_count(void)
+{
+    return s_fb_count;
 }
 
 void lcd_display_clear(void)
 {
-    if (s_fb[s_draw_idx]) {
-        memset(s_fb[s_draw_idx], 0, LCD_WIDTH * LCD_HEIGHT * (LCD_BPP / 8));
+    if (s_fb[0]) {
+        memset(s_fb[0], 0, LCD_WIDTH * LCD_HEIGHT * (LCD_BPP / 8));
     }
 }
 
 void lcd_display_flush(void)
 {
-    if (!s_fb[s_draw_idx] || !s_lcd_panel) return;
+    if (!s_fb[0] || !s_lcd_panel) return;
 
-    int submit_idx = s_draw_idx;
-
-    esp_cache_msync((void *)s_fb[submit_idx],
+    esp_cache_msync((void *)s_fb[0],
                     LCD_WIDTH * LCD_HEIGHT * (LCD_BPP / 8),
                     ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 
-    esp_err_t err = esp_lcd_panel_draw_bitmap(s_lcd_panel, 0, 0, LCD_WIDTH, LCD_HEIGHT, s_fb[submit_idx]);
+    esp_err_t err = esp_lcd_panel_draw_bitmap(s_lcd_panel, 0, 0, LCD_WIDTH, LCD_HEIGHT, s_fb[0]);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "draw_bitmap failed: %s", esp_err_to_name(err));
         return;
     }
+}
 
-    s_draw_idx = 1 - submit_idx;
+esp_lcd_panel_handle_t lcd_display_get_panel(void)
+{
+    return s_lcd_panel;
+}
+
+esp_lcd_panel_io_handle_t lcd_display_get_io(void)
+{
+    return s_mipi_dbi_io;
 }

@@ -145,7 +145,7 @@ extern "C" bool person_detect_run(const uint8_t *rgb565_buf, int img_width, int 
 
     std::list<dl::detect::result_t> results = s_detector->run(img);
     
-    ESP_LOGI(TAG, "Total detections: %d", (int)results.size());
+    // ESP_LOGI(TAG, "Total detections: %d", (int)results.size());
     
     int idx = 0;
     for (auto &res : results) {
