@@ -3,3 +3,4 @@
 nvs,      data, nvs,     ,        0x6000,
 phy_init, data, phy,     ,        0x1000,
 factory,  app,  factory, ,        8M,
+model,    data, 0x82,    ,        0x40000,

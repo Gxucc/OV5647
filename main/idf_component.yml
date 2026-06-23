@@ -14,13 +14,13 @@ dependencies:
   #   # `public` flag doesn't have an effect dependencies of the `main` component.
   #   # All dependencies of `main` are public by default.
   #   public: true
-  espressif/esp_cam_sensor: ^2.1.0
   espressif/esp_wifi_remote: ^1.5.2
   espressif/esp_hosted: ^2.12.7
-  espressif/esp_video: ^2.1.0
+  espressif/esp_video: ^2.2.0
 
   espressif/esp_lcd_ek79007: ^2.0.2~1
-  espressif/esp-dl: ^3.3.3
+  espressif/esp-dl: ^3.3.5
 
   espressif/pedestrian_detect: ^0.3.0
- 
+
+  espressif/esp-nn: ^1.2.3

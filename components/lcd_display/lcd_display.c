@@ -1,6 +1,5 @@
 #include "lcd_display.h"
 #include <string.h>
-#include <stdbool.h>
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
@@ -16,15 +15,15 @@ static const char *TAG = "lcd_display";
 
 #define LCD_RST_GPIO        27
 #define LCD_BL_GPIO         26
-#define LCD_BPP             16  // RGB565
+#define LCD_BPP             16
 
 static esp_lcd_panel_handle_t s_lcd_panel = NULL;
 static esp_lcd_dsi_bus_handle_t s_dsi_bus = NULL;
-static uint8_t *s_lcd_buffer = NULL;
+static void *s_fb[2] = {NULL, NULL};
+static int s_draw_idx = 0;
 
 esp_err_t lcd_display_init(void)
 {
-    // 1. LDO 供电 MIPI PHY
     esp_ldo_channel_handle_t ldo_mipi_phy = NULL;
     esp_ldo_channel_config_t ldo_mipi_phy_config = {
         .chan_id = 3,
@@ -33,21 +32,39 @@ esp_err_t lcd_display_init(void)
     ESP_ERROR_CHECK(esp_ldo_acquire_channel(&ldo_mipi_phy_config, &ldo_mipi_phy));
     ESP_LOGI(TAG, "MIPI DSI PHY Powered on");
 
-    // 2. MIPI-DSI bus (2 lane)
     esp_lcd_dsi_bus_config_t bus_config = EK79007_PANEL_BUS_DSI_2CH_CONFIG();
     ESP_ERROR_CHECK(esp_lcd_new_dsi_bus(&bus_config, &s_dsi_bus));
     ESP_LOGI(TAG, "MIPI DSI bus initialized");
 
-    // 3. DBI IO
     esp_lcd_panel_io_handle_t mipi_dbi_io = NULL;
     esp_lcd_dbi_io_config_t dbi_config = EK79007_PANEL_IO_DBI_CONFIG();
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_dbi(s_dsi_bus, &dbi_config, &mipi_dbi_io));
     ESP_LOGI(TAG, "Panel IO installed");
 
-    // 4. DPI 配置 RGB565
-    const esp_lcd_dpi_panel_config_t dpi_config = EK79007_1024_600_PANEL_60HZ_CONFIG_CF(LCD_COLOR_FMT_RGB565);
+    const esp_lcd_dpi_panel_config_t dpi_config = {
+        .virtual_channel = 0,
+        .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
+        .dpi_clock_freq_mhz = 30,
+        .pixel_format = LCD_COLOR_FMT_RGB565,
+        .in_color_format = LCD_COLOR_FMT_RGB565,
+        .out_color_format = LCD_COLOR_FMT_RGB565,
+        .num_fbs = 2,
+        .video_timing = {
+            .h_size = LCD_WIDTH,
+            .v_size = LCD_HEIGHT,
+            .hsync_back_porch = 40,
+            .hsync_front_porch = 40,
+            .hsync_pulse_width = 10,
+            .vsync_back_porch = 10,
+            .vsync_front_porch = 10,
+            .vsync_pulse_width = 2,
+        },
+        .flags = {
+            .use_dma2d = 1,
+            .disable_lp = 0,
+        },
+    };
 
-    // 5. vendor_config
     ek79007_vendor_config_t vendor_config = {
         .mipi_config = {
             .dsi_bus = s_dsi_bus,
@@ -55,7 +72,6 @@ esp_err_t lcd_display_init(void)
         },
     };
 
-    // 6. 面板配置
     const esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = LCD_RST_GPIO,
         .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
@@ -68,11 +84,6 @@ esp_err_t lcd_display_init(void)
     ESP_ERROR_CHECK(esp_lcd_panel_init(s_lcd_panel));
     ESP_LOGI(TAG, "EK79007 panel initialized");
 
-    // 启用 2D-DMA 加速
-    ESP_ERROR_CHECK(esp_lcd_dpi_panel_enable_dma2d(s_lcd_panel));
-    ESP_LOGI(TAG, "2D-DMA enabled for LCD");
-
-    // 7. 背光 GPIO
     gpio_config_t bl_cfg = {
         .mode = GPIO_MODE_OUTPUT,
         .pin_bit_mask = (1ULL << LCD_BL_GPIO),
@@ -81,56 +92,66 @@ esp_err_t lcd_display_init(void)
     gpio_set_level(LCD_BL_GPIO, 1);
     ESP_LOGI(TAG, "Backlight on");
 
-    // 8. 帧缓冲 PSRAM（64 字节对齐）
-    s_lcd_buffer = heap_caps_aligned_alloc(64, 
-                                           LCD_WIDTH * LCD_HEIGHT * (LCD_BPP / 8),
-                                           MALLOC_CAP_SPIRAM);
-    if (!s_lcd_buffer) {
-        ESP_LOGE(TAG, "Failed to alloc aligned LCD buffer");
-        return ESP_FAIL;
-    }
+    ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(s_lcd_panel, 2, &s_fb[0], &s_fb[1]));
+    ESP_LOGI(TAG, "Double buffer acquired from driver");
 
-    lcd_display_clear();
+    s_draw_idx = 0;
+
     return ESP_OK;
 }
 
-void lcd_display_clear(void)
+void lcd_display_deinit(void)
 {
-    if (s_lcd_buffer) {
-        memset(s_lcd_buffer, 0, LCD_WIDTH * LCD_HEIGHT * (LCD_BPP / 8));
-        lcd_display_flush();
+    if (s_lcd_panel) {
+        esp_lcd_panel_del(s_lcd_panel);
+        s_lcd_panel = NULL;
     }
+    if (s_dsi_bus) {
+        esp_lcd_del_dsi_bus(s_dsi_bus);
+        s_dsi_bus = NULL;
+    }
+    s_fb[0] = NULL;
+    s_fb[1] = NULL;
 }
 
-// 1:1 全屏显示，摄像头 1024x600 与 LCD 分辨率完全匹配
-void lcd_display_camera(const uint8_t *rgb565_buf, uint32_t cam_width, uint32_t cam_height)
+void lcd_display_copy_camera(const uint8_t *rgb565_buf, uint32_t cam_width, uint32_t cam_height)
 {
-    if (!s_lcd_buffer || !rgb565_buf) return;
+    if (!s_fb[s_draw_idx] || !rgb565_buf) return;
 
-    // 分辨率必须严格匹配
-    if (cam_width != LCD_WIDTH || cam_height != LCD_HEIGHT) {
-        ESP_LOGW(TAG, "Camera size %dx%d != LCD %dx%d, copy anyway", 
-                 cam_width, cam_height, LCD_WIDTH, LCD_HEIGHT);
-        // 仍然可以拷贝，但只拷贝重叠部分
-    }
-    
-    // 直接整帧 memcpy，无需偏移或裁剪
-    uint32_t copy_bytes = (cam_width < LCD_WIDTH ? cam_width : LCD_WIDTH) * 
-                          (cam_height < LCD_HEIGHT ? cam_height : LCD_HEIGHT) * 2;
-    memcpy(s_lcd_buffer, rgb565_buf, copy_bytes);
+    uint32_t copy_w = (cam_width < LCD_WIDTH) ? cam_width : LCD_WIDTH;
+    uint32_t copy_h = (cam_height < LCD_HEIGHT) ? cam_height : LCD_HEIGHT;
+    uint32_t copy_bytes = copy_w * copy_h * 2;
 
-    lcd_display_flush();
-}
-
-void lcd_display_flush(void)
-{
-    if (s_lcd_buffer && s_lcd_panel) {
-        esp_cache_msync((void *)s_lcd_buffer, LCD_WIDTH * LCD_HEIGHT * (LCD_BPP / 8), ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-        esp_lcd_panel_draw_bitmap(s_lcd_panel, 0, 0, LCD_WIDTH, LCD_HEIGHT, s_lcd_buffer);
-    }
+    memcpy(s_fb[s_draw_idx], rgb565_buf, copy_bytes);
 }
 
 uint8_t *lcd_display_get_buffer(void)
 {
-    return s_lcd_buffer;
+    return (uint8_t *)s_fb[s_draw_idx];
+}
+
+void lcd_display_clear(void)
+{
+    if (s_fb[s_draw_idx]) {
+        memset(s_fb[s_draw_idx], 0, LCD_WIDTH * LCD_HEIGHT * (LCD_BPP / 8));
+    }
+}
+
+void lcd_display_flush(void)
+{
+    if (!s_fb[s_draw_idx] || !s_lcd_panel) return;
+
+    int submit_idx = s_draw_idx;
+
+    esp_cache_msync((void *)s_fb[submit_idx],
+                    LCD_WIDTH * LCD_HEIGHT * (LCD_BPP / 8),
+                    ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+
+    esp_err_t err = esp_lcd_panel_draw_bitmap(s_lcd_panel, 0, 0, LCD_WIDTH, LCD_HEIGHT, s_fb[submit_idx]);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "draw_bitmap failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    s_draw_idx = 1 - submit_idx;
 }
