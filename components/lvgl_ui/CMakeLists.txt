@@ -5,4 +5,5 @@ idf_component_register(
         lcd_display
         esp_lvgl_adapter
         touch_gt911
+        audio_recorder
 )

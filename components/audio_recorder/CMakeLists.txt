@@ -9,4 +9,5 @@ idf_component_register(
         fatfs           # 文件操作 (fopen, fwrite)
         sdmmc           # SD卡 (可选，如果保存到SD卡需要)
         esp_codec_dev
+        esp_timer
 )

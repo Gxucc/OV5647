@@ -3,6 +3,7 @@
 #include "esp_err.h"
 #include "driver/i2c_master.h"
 #include "esp_lcd_touch_gt911.h"
+#include "lcd_display.h"
 
 static const char *TAG = "touch_gt911";
 
@@ -65,8 +66,8 @@ esp_err_t touch_gt911_read(int *x, int *y, bool *pressed)
     bool touched = esp_lcd_touch_get_coordinates(s_tp, &touch_x, &touch_y, &strength, &finger_num, 1);
 
     if (touched) {
-        *x = touch_x;
-        *y = touch_y;
+        *x = LCD_WIDTH - 1 - touch_x;  // 反转 X
+        *y = LCD_HEIGHT - 1 - touch_y; // 反转 Y
         *pressed = true;
         ESP_LOGD(TAG, "Touch: x=%d, y=%d, strength=%d", touch_x, touch_y, strength);
     } else {

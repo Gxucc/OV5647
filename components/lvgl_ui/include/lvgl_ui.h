@@ -7,7 +7,8 @@
 // 界面状态
 typedef enum {
     UI_STATE_HOME,       // 主界面
-    UI_STATE_FALL_DEBUG  // 跌倒检测调试界面
+    UI_STATE_FALL_DEBUG, // 跌倒检测调试界面
+    UI_STATE_RECORD,     // 录音界面
 } ui_state_t;
 
 // 初始化 LVGL 显示系统
@@ -28,10 +29,19 @@ void lvgl_ui_task_handler(void);
 // 检查是否应该进入跌倒检测调试
 bool lvgl_ui_should_start_fall_debug(void);
 
+// 检查是否应该进入录音界面
+bool lvgl_ui_should_start_record(void);
+
 // 检查是否应该返回主界面
 bool lvgl_ui_should_return_home(void);
 
 // 设置返回主界面标志
 void lvgl_ui_set_return_home(void);
+
+// 检查是否需要暂停跌倒检测（进入录音界面）
+bool lvgl_ui_should_pause_detect(void);
+
+// 检查是否需要恢复跌倒检测（退出录音界面）
+bool lvgl_ui_should_resume_detect(void);
 
 #endif
