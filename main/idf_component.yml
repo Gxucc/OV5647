@@ -25,3 +25,5 @@ dependencies:
 
   espressif/esp_lvgl_adapter: ^0.5.2
   espressif/esp_lcd_touch_gt911: ^1.2.0~2
+  espressif/es8311: ^1.0.0~1
+  espressif/esp_codec_dev: ^1.5.10
