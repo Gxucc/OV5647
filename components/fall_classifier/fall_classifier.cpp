@@ -122,7 +122,7 @@ extern "C" bool fall_classifier_init(void)
 
     // 官方方式：分区标签加载
     s_model = new dl::Model(
-        "model",
+        "model_fall",
         fbs::MODEL_LOCATION_IN_FLASH_PARTITION,
         0,
         dl::MEMORY_MANAGER_GREEDY,

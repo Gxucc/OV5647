@@ -6,6 +6,7 @@
 #include "esp_err.h"
 #include "esp_timer.h"
 #include "driver/i2c_master.h"
+#include "esp_heap_caps.h"
 
 #include "lcd_display.h"
 #include "lvgl_ui.h"
@@ -13,6 +14,7 @@
 #include "person_detect.h"
 #include "fall_classifier.h"
 #include "audio_recorder.h"
+#include "babysound_detector.h"
 
 static const char *TAG = "main";
 
@@ -57,6 +59,10 @@ static bool s_has_new_fall_result = false;
 static i2c_master_bus_handle_t s_i2c_bus = NULL;
 static TaskHandle_t s_detect_task_handle = NULL;
 static TaskHandle_t s_fall_classify_task_handle = NULL;
+static TaskHandle_t s_babysound_task_handle = NULL;
+
+// 婴儿声音检测状态管理
+static bool s_babysound_was_running = false;  // 进入录音界面前的状态
 
 // ==================== 检测任务 ====================
 
@@ -65,9 +71,14 @@ static void detect_task(void *pv)
     cam_frame_t frame;
     detect_result_t result;
 
+    ESP_LOGI(TAG, "detect_task started");
+
     while (1) {
+        ESP_LOGD(TAG, "detect_task waiting for frame...");
         if (xQueueReceive(s_detect_queue, &frame, portMAX_DELAY) == pdTRUE) {
+            ESP_LOGD(TAG, "detect_task received frame, running person_detect...");
             result.detected = person_detect_run(frame.rgb_buf, CAM_WIDTH, CAM_HEIGHT, &result.box);
+            ESP_LOGD(TAG, "detect_task done, detected=%d", result.detected);
             xQueueSend(s_result_queue, &result, portMAX_DELAY);
             cam_net_release_rgb565();
         }
@@ -79,8 +90,12 @@ static void fall_classify_task(void *pv)
     fall_detect_task_t task;
     fall_classifier_result_t result;
 
+    ESP_LOGI(TAG, "fall_classify_task started");
+
     while (1) {
+        ESP_LOGD(TAG, "fall_classify_task waiting for task...");
         if (xQueueReceive(s_fall_queue, &task, portMAX_DELAY) == pdTRUE) {
+            ESP_LOGD(TAG, "fall_classify_task received task, detected=%d", task.detected);
             if (task.detected) {
                 bool ok = fall_classifier_run(task.rgb_buf, CAM_WIDTH, CAM_HEIGHT, &task.box, &result);
                 if (ok) {
@@ -92,12 +107,148 @@ static void fall_classify_task(void *pv)
     }
 }
 
+// ==================== 婴儿声音检测任务（滑动窗口平均滤波） ====================
+
+#define PCM_SAMPLES         16000
+#define READ_CHUNK_MS       100
+#define READ_CHUNK_SAMPLES  (16000 * READ_CHUNK_MS / 1000)  // 1600 samples
+#define PCM_RING_SIZE       (PCM_SAMPLES * 2)                // 2秒环形缓冲
+
+// 滑动窗口滤波参数
+#define MA_WINDOW_SIZE      5       // 滑动窗口大小（最近5帧平均）
+#define MA_BABY_THRESHOLD   0.6f    // 判定为 BABY 的阈值
+#define MA_HYST_COUNT       3       // 连续帧数（状态机防抖）
+
+static int16_t *s_pcm_ring_buffer = NULL;
+static int16_t *s_pcm_infer_buffer = NULL;
+static int s_pcm_write_idx = 0;
+
+// 滑动窗口缓冲区
+static float s_ma_window[MA_WINDOW_SIZE];
+static int s_ma_idx = 0;
+static int s_ma_count = 0;
+
+static float moving_average_update(float new_val)
+{
+    s_ma_window[s_ma_idx] = new_val;
+    s_ma_idx = (s_ma_idx + 1) % MA_WINDOW_SIZE;
+    if (s_ma_count < MA_WINDOW_SIZE) {
+        s_ma_count++;
+    }
+
+    float sum = 0.0f;
+    for (int i = 0; i < s_ma_count; i++) {
+        sum += s_ma_window[i];
+    }
+    return sum / s_ma_count;
+}
+
+static void babysound_task(void *pv)
+{
+    ESP_LOGI(TAG, "Babysound detection task started (persistent, chunk mode, PSRAM, MA filter)");
+
+    if (!s_pcm_ring_buffer || !s_pcm_infer_buffer) {
+        ESP_LOGE(TAG, "Audio buffers not allocated!");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    memset(s_pcm_ring_buffer, 0, PCM_RING_SIZE * sizeof(int16_t));
+    s_pcm_write_idx = 0;
+    memset(s_ma_window, 0, sizeof(s_ma_window));
+    s_ma_idx = 0;
+    s_ma_count = 0;
+
+    int16_t chunk[READ_CHUNK_SAMPLES];
+    int chunk_counter = 0;
+
+    // 状态机变量
+    int baby_state_count = 0;
+    int nonbaby_state_count = 0;
+    bool is_baby_state = false;
+
+    while (1) {
+        // 开关关闭时挂起等待
+        if (!lvgl_ui_babysound_switch_is_on()) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            chunk_counter = 0;
+            continue;
+        }
+
+        // 小 chunk 读取，每次阻塞约 100ms
+        esp_err_t ret = audio_recorder_read_samples(chunk, READ_CHUNK_SAMPLES, 300);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Chunk read failed: %s", esp_err_to_name(ret));
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+
+        // 写入环形缓冲区
+        for (int i = 0; i < READ_CHUNK_SAMPLES; i++) {
+            s_pcm_ring_buffer[s_pcm_write_idx] = chunk[i];
+            s_pcm_write_idx = (s_pcm_write_idx + 1) % PCM_RING_SIZE;
+        }
+
+        chunk_counter++;
+
+        // 每 10 个 chunk（1秒）推理一次
+        if (chunk_counter < 10) {
+            continue;
+        }
+        chunk_counter = 0;
+
+        // 从环形缓冲区提取最近 1秒数据
+        int start_idx = (s_pcm_write_idx - PCM_SAMPLES + PCM_RING_SIZE) % PCM_RING_SIZE;
+        for (int i = 0; i < PCM_SAMPLES; i++) {
+            s_pcm_infer_buffer[i] = s_pcm_ring_buffer[(start_idx + i) % PCM_RING_SIZE];
+        }
+
+        // 推理
+        babysound_result_t result;
+        ret = babysound_detector_run(s_pcm_infer_buffer, &result);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Babysound detection failed: %s", esp_err_to_name(ret));
+            continue;
+        }
+
+        // 滑动窗口平均滤波
+        float ma_baby_prob = moving_average_update(result.baby_prob);
+
+        // 状态机防抖
+        if (ma_baby_prob > MA_BABY_THRESHOLD) {
+            baby_state_count++;
+            nonbaby_state_count = 0;
+            if (baby_state_count >= MA_HYST_COUNT && !is_baby_state) {
+                is_baby_state = true;
+                ESP_LOGI(TAG, "=== BABYSOUND STATE: BABY (raw: %.3f, ma: %.3f) ===", 
+                         result.baby_prob, ma_baby_prob);
+            }
+        } else {
+            nonbaby_state_count++;
+            baby_state_count = 0;
+            if (nonbaby_state_count >= MA_HYST_COUNT && is_baby_state) {
+                is_baby_state = false;
+                ESP_LOGI(TAG, "=== BABYSOUND STATE: NON-BABY (raw: %.3f, ma: %.3f) ===", 
+                         result.baby_prob, ma_baby_prob);
+            }
+        }
+
+        // 调试日志（每帧输出原始值和滤波值）
+        ESP_LOGI(TAG, "Babysound raw: %.3f, MA: %.3f, state: %s", 
+                 result.baby_prob, ma_baby_prob, is_baby_state ? "BABY" : "NON-BABY");
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
 // ==================== 显示任务 ====================
 
 static void display_task(void *pv)
 {
     int frame_counter = 0;
     s_last_fps_time = esp_timer_get_time();
+
+    ESP_LOGI(TAG, "display_task started");
 
     while (1) {
         uint8_t *rgb_buf = NULL;
@@ -178,12 +329,14 @@ static void display_task(void *pv)
 
             lcd_display_flush();
         }
-        // UI_STATE_HOME 和 UI_STATE_RECORD 时：不显示摄像头画面，只释放帧
+        // UI_STATE_HOME / UI_STATE_RECORD / UI_STATE_BABYSOUND 时：不显示摄像头画面，只释放帧
 
         // 隔3帧检测一次，同时送跌倒分类（仅在非录音界面）
         if (state != UI_STATE_RECORD && frame_counter % 3 == 0) {
+            ESP_LOGD(TAG, "Sending frame to detect queue, frame_counter=%d, state=%d", frame_counter, state);
             cam_frame_t frame = { .rgb_buf = rgb_buf, .rgb_size = rgb_size };
             if (xQueueSend(s_detect_queue, &frame, 0) != pdPASS) {
+                ESP_LOGW(TAG, "Detect queue full!");
                 cam_net_release_rgb565();
             }
 
@@ -233,6 +386,9 @@ static void lvgl_task(void *pv)
         if (lvgl_ui_should_start_record()) {
             lvgl_ui_set_state(UI_STATE_RECORD);
         }
+        if (lvgl_ui_should_start_babysound()) {
+            lvgl_ui_set_state(UI_STATE_BABYSOUND);
+        }
 
         // 检查是否需要暂停/恢复跌倒检测任务
         if (lvgl_ui_should_pause_detect()) {
@@ -254,6 +410,23 @@ static void lvgl_task(void *pv)
             }
         }
 
+        // 检查是否需要暂停/恢复婴儿声音检测任务（参照跌倒检测逻辑）
+        if (lvgl_ui_should_pause_babysound()) {
+            ESP_LOGI(TAG, "Pausing babysound detection");
+            // 保存当前运行状态（开关是否开启）
+            s_babysound_was_running = lvgl_ui_babysound_switch_is_on();
+            if (s_babysound_task_handle) {
+                vTaskSuspend(s_babysound_task_handle);
+            }
+        }
+        if (lvgl_ui_should_resume_babysound()) {
+            ESP_LOGI(TAG, "Resuming babysound detection, was_running=%d", s_babysound_was_running);
+            // 恢复之前的状态：如果之前开关是开启的，恢复任务
+            if (s_babysound_task_handle && s_babysound_was_running) {
+                vTaskResume(s_babysound_task_handle);
+            }
+        }
+
         lvgl_ui_task_handler();
         vTaskDelay(pdMS_TO_TICKS(5));
     }
@@ -265,26 +438,36 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "Starting app...");
 
-    // 1. 先加载 AI 模型（需要大块连续 PSRAM，优先分配）
+    // 0. 分配音频缓冲区到 PSRAM（避免内部 SRAM 不足）
+    s_pcm_ring_buffer = (int16_t *)heap_caps_malloc(PCM_RING_SIZE * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    s_pcm_infer_buffer = (int16_t *)heap_caps_malloc(PCM_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    if (!s_pcm_ring_buffer || !s_pcm_infer_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate audio buffers in PSRAM!");
+        return;
+    }
+    ESP_LOGI(TAG, "Audio buffers allocated in PSRAM: ring=%p, infer=%p", s_pcm_ring_buffer, s_pcm_infer_buffer);
+
+    // 1. 先初始化 camera（创建 I2C bus）
+    ESP_ERROR_CHECK(cam_net_init());
+
+    // 2. 获取已有的 I2C bus handle
+    ESP_ERROR_CHECK(i2c_master_get_bus_handle(I2C_NUM_0, &s_i2c_bus));
+
+    // 3. 先初始化音频（I2S DMA 需要内部 SRAM 连续内存）
+    ESP_ERROR_CHECK(audio_recorder_system_init(s_i2c_bus));
+
+    // 4. 再初始化显示和 UI（LVGL 缓冲区需要内部 SRAM）
+    ESP_ERROR_CHECK(lcd_display_init());
+    ESP_ERROR_CHECK(lvgl_ui_init());
+
+    // 5. 最后加载 AI 模型（会自动使用 PSRAM）
     ESP_ERROR_CHECK(person_detect_init());
     if (!fall_classifier_init()) {
         ESP_LOGE(TAG, "Fall classifier init failed");
         return;
     }
+    ESP_ERROR_CHECK(babysound_detector_init());
     ESP_LOGI(TAG, "AI models loaded");
-
-    // 2. 初始化 camera（创建 I2C bus）
-    ESP_ERROR_CHECK(cam_net_init());
-
-    // 3. 获取已有的 I2C bus handle
-    ESP_ERROR_CHECK(i2c_master_get_bus_handle(I2C_NUM_0, &s_i2c_bus));
-
-    // 4. 初始化显示和 UI
-    ESP_ERROR_CHECK(lcd_display_init());
-    ESP_ERROR_CHECK(lvgl_ui_init());
-
-    // 5. 初始化音频（复用已有 I2C bus，内存需求小）
-    ESP_ERROR_CHECK(audio_recorder_system_init(s_i2c_bus));
 
     ESP_LOGI(TAG, "All modules initialized");
 
@@ -294,14 +477,16 @@ void app_main(void)
     s_fall_queue = xQueueCreate(2, sizeof(fall_detect_task_t));
     s_fall_result_queue = xQueueCreate(2, sizeof(fall_classifier_result_t));
 
-    // 7. 创建任务
-   // 创建任务
-    xTaskCreatePinnedToCore(detect_task, "detect", 8192, NULL, 3, &s_detect_task_handle, 1);        // 降低
-    xTaskCreatePinnedToCore(fall_classify_task, "fall_classify", 8192, NULL, 2, &s_fall_classify_task_handle, 1);  // 降低
-    xTaskCreatePinnedToCore(display_task, "display", 4096, NULL, 5, NULL, 0);   // 提高
-    xTaskCreatePinnedToCore(lvgl_task, "lvgl", 4096, NULL, 4, NULL, 0);      // 提高
+    // 7. 创建任务（婴儿声音检测任务常驻，上电启动一次）
+    // Core 1: 跌倒检测（高优先级实时）
+    xTaskCreatePinnedToCore(detect_task, "detect", 8192, NULL, 3, &s_detect_task_handle, 1);
+    xTaskCreatePinnedToCore(fall_classify_task, "fall_classify", 8192, NULL, 2, &s_fall_classify_task_handle, 1);
+    // Core 1: 婴儿声音检测（低优先级，小 chunk 采集不阻塞）
+    xTaskCreatePinnedToCore(babysound_task, "babysound", 8192, NULL, 1, &s_babysound_task_handle, 1);
+    // Core 0: 显示和 UI
+    xTaskCreatePinnedToCore(display_task, "display", 4096, NULL, 5, NULL, 0);
+    xTaskCreatePinnedToCore(lvgl_task, "lvgl", 4096, NULL, 4, NULL, 0);
 
-    // 主循环（空转，任务已分配）
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }

@@ -36,7 +36,6 @@ static const char *TAG = "audio_recorder";
 #define REC_CHUNK_SAMPLES   (16000 * REC_CHUNK_MS / 1000)  // 1600 samples
 
 static i2s_chan_handle_t s_i2s_rx_chan = NULL;
-static i2s_chan_handle_t s_i2s_tx_chan = NULL;
 static esp_codec_dev_handle_t s_codec_dev = NULL;
 static sdmmc_card_t *s_sd_card = NULL;
 static bool s_is_recording = false;
@@ -76,13 +75,21 @@ static esp_err_t init_sd_card(void)
     return ESP_OK;
 }
 
-// ==================== I2S ====================
+// ==================== I2S (仅 RX) ====================
 
 static esp_err_t init_i2s(void)
 {
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM, I2S_ROLE_MASTER);
     chan_cfg.auto_clear = true;
-    ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &s_i2s_tx_chan, &s_i2s_rx_chan));
+    // 极致减小 DMA 配置
+    chan_cfg.dma_desc_num = 2;      // 最小 DMA 描述符数量
+    chan_cfg.dma_frame_num = 64;    // 最小帧数
+    
+    // 关键：确保 DMA 缓冲区分配在内部 RAM，避免 PSRAM
+    chan_cfg.dma_frame_num = 64;
+    
+    ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, NULL, &s_i2s_rx_chan));
+
     i2s_std_config_t std_cfg = {
         .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(16000),
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
@@ -90,16 +97,16 @@ static esp_err_t init_i2s(void)
             .mclk = I2S_MCLK_GPIO,
             .bclk = I2S_BCLK_GPIO,
             .ws = I2S_WS_GPIO,
-            .dout = GPIO_NUM_9,
+            .dout = GPIO_NUM_NC,
             .din = GPIO_NUM_11,
             .invert_flags = { .mclk_inv = false, .bclk_inv = false, .ws_inv = false },
         },
     };
     std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
     std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
-    ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_i2s_tx_chan, &std_cfg));
+
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(s_i2s_rx_chan, &std_cfg));
-    ESP_LOGI(TAG, "I2S initialized (mono left)");
+    ESP_LOGI(TAG, "I2S RX initialized (dma_desc=2, frame_num=64)");
     return ESP_OK;
 }
 
@@ -108,42 +115,42 @@ static esp_err_t init_i2s(void)
 static esp_err_t init_es8311(i2c_master_bus_handle_t i2c_bus)
 {
     ESP_LOGI(TAG, "init_es8311 with bus=%p", i2c_bus);
-    
+
     audio_codec_i2c_cfg_t i2c_cfg = {
         .port = I2C_NUM_0,
         .addr = ES8311_CODEC_DEFAULT_ADDR,
         .bus_handle = i2c_bus,
     };
-    
+
     const audio_codec_ctrl_if_t *ctrl_if = audio_codec_new_i2c_ctrl(&i2c_cfg);
     if (!ctrl_if) {
         ESP_LOGE(TAG, "audio_codec_new_i2c_ctrl failed");
         return ESP_FAIL;
     }
     ESP_LOGI(TAG, "audio_codec_new_i2c_ctrl success");
-    
+
     audio_codec_i2s_cfg_t i2s_cfg = {
         .port = I2S_NUM,
         .rx_handle = s_i2s_rx_chan,
-        .tx_handle = s_i2s_tx_chan,
+        .tx_handle = NULL,  // 没有 TX 通道
     };
     const audio_codec_data_if_t *data_if = audio_codec_new_i2s_data(&i2s_cfg);
     if (!data_if) {
         audio_codec_delete_ctrl_if(ctrl_if);
         return ESP_FAIL;
     }
-    
+
     const audio_codec_gpio_if_t *gpio_if = audio_codec_new_gpio();
     if (!gpio_if) {
         audio_codec_delete_ctrl_if(ctrl_if);
         audio_codec_delete_data_if(data_if);
         return ESP_FAIL;
     }
-    
+
     es8311_codec_cfg_t es8311_cfg = {
         .ctrl_if = ctrl_if,
         .gpio_if = gpio_if,
-        .codec_mode = ESP_CODEC_DEV_WORK_MODE_BOTH,
+        .codec_mode = ESP_CODEC_DEV_WORK_MODE_ADC,  // 仅 ADC 模式（录音）
         .master_mode = false,
         .use_mclk = true,
         .pa_pin = PA_CTRL_GPIO,
@@ -161,9 +168,9 @@ static esp_err_t init_es8311(i2c_master_bus_handle_t i2c_bus)
         audio_codec_delete_gpio_if(gpio_if);
         return ESP_FAIL;
     }
-    
+
     esp_codec_dev_cfg_t dev_cfg = {
-        .dev_type = ESP_CODEC_DEV_TYPE_IN_OUT,
+        .dev_type = ESP_CODEC_DEV_TYPE_IN,  // 仅输入
         .codec_if = es8311_if,
         .data_if = data_if,
     };
@@ -171,7 +178,7 @@ static esp_err_t init_es8311(i2c_master_bus_handle_t i2c_bus)
     if (!s_codec_dev) {
         return ESP_FAIL;
     }
-    
+
     esp_codec_dev_sample_info_t sample_cfg = {
         .bits_per_sample = I2S_DATA_BIT_WIDTH_16BIT,
         .channel = 1,
@@ -182,9 +189,9 @@ static esp_err_t init_es8311(i2c_master_bus_handle_t i2c_bus)
         ESP_LOGE(TAG, "Failed to open codec");
         return ESP_FAIL;
     }
-    
+
     esp_codec_dev_set_in_gain(s_codec_dev, 42);
-    ESP_LOGI(TAG, "ES8311 initialized");
+    ESP_LOGI(TAG, "ES8311 initialized (ADC only)");
     return ESP_OK;
 }
 
@@ -195,9 +202,9 @@ static void recorder_task(void *arg)
     int sample_rate = s_rec_cfg.sample_rate;
     int duration_ms = s_rec_cfg.duration_ms;
     const char *path = s_rec_cfg.path;
-    
+
     ESP_LOGI(TAG, "recorder_task started: sr=%d, dur=%d, path=%s", sample_rate, duration_ms, path);
-    
+
     // 分配 chunk 缓冲区（内部 RAM，仅 3.2KB）
     size_t chunk_bytes = REC_CHUNK_SAMPLES * sizeof(int16_t);
     int16_t *chunk_buf = heap_caps_malloc(chunk_bytes, MALLOC_CAP_INTERNAL);
@@ -208,7 +215,7 @@ static void recorder_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
-    
+
     // 打开文件，预留 WAV 头位置
     ESP_LOGI(TAG, "Opening %s for writing", path);
     FILE *f = fopen(path, "wb");
@@ -220,11 +227,11 @@ static void recorder_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
-    
+
     // 写入占位 WAV 头（44 字节）
     uint8_t placeholder[44] = {0};
     fwrite(placeholder, 1, 44, f);
-    
+
     // 配置 ES8311 采样率
     esp_codec_dev_sample_info_t fs = {
         .bits_per_sample = I2S_DATA_BIT_WIDTH_16BIT,
@@ -232,7 +239,7 @@ static void recorder_task(void *arg)
         .channel_mask = 0x01,
         .sample_rate = sample_rate,
     };
-    
+
     ESP_LOGI(TAG, "Opening codec for read");
     if (esp_codec_dev_open(s_codec_dev, &fs) != ESP_CODEC_DEV_OK) {
         ESP_LOGE(TAG, "Failed to open codec for read");
@@ -243,13 +250,13 @@ static void recorder_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
-    
+
     // 录音循环：边录边写
     size_t total_bytes = 0;
     int64_t start_time = esp_timer_get_time();
-    
+
     ESP_LOGI(TAG, "Recording started, max duration %d ms", duration_ms);
-    
+
     while (s_is_recording) {
         // 检查是否超时
         int64_t elapsed_ms = (esp_timer_get_time() - start_time) / 1000;
@@ -257,11 +264,11 @@ static void recorder_task(void *arg)
             ESP_LOGI(TAG, "Reached max duration %d ms", duration_ms);
             break;
         }
-        
+
         // 读取音频 chunk
         size_t bytes_read = 0;
         esp_err_t ret = i2s_channel_read(s_i2s_rx_chan, chunk_buf, chunk_bytes, &bytes_read, pdMS_TO_TICKS(REC_CHUNK_MS + 50));
-        
+
         if (ret == ESP_OK && bytes_read > 0) {
             // 直接写入文件
             size_t written = fwrite(chunk_buf, 1, bytes_read, f);
@@ -273,22 +280,22 @@ static void recorder_task(void *arg)
         } else if (ret != ESP_OK) {
             ESP_LOGW(TAG, "i2s_channel_read failed: %s", esp_err_to_name(ret));
         }
-        
+
         // 检查是否被请求停止
         if (!s_is_recording) {
             ESP_LOGI(TAG, "Recording stopped by user");
             break;
         }
     }
-    
+
     ESP_LOGI(TAG, "Recording finished, total %d bytes", total_bytes);
-    
+
     // 关闭 codec
     esp_codec_dev_close(s_codec_dev);
-    
+
     // 回到文件开头，写入正确的 WAV 头
     fseek(f, 0, SEEK_SET);
-    
+
     uint32_t data_size = total_bytes;
     uint32_t file_size = data_size + 36;
     uint8_t wav_header[44] = {
@@ -303,12 +310,12 @@ static void recorder_task(void *arg)
         'd','a','t','a',
         (data_size & 0xFF), ((data_size >> 8) & 0xFF), ((data_size >> 16) & 0xFF), ((data_size >> 24) & 0xFF),
     };
-    
+
     fwrite(wav_header, 1, 44, f);
     fclose(f);
-    
+
     ESP_LOGI(TAG, "WAV saved: %s (%d bytes)", path, file_size);
-    
+
     // 清理
     heap_caps_free(chunk_buf);
     s_is_recording = false;
@@ -321,7 +328,7 @@ static void recorder_task(void *arg)
 esp_err_t audio_recorder_system_init(void *i2c_bus)
 {
     ESP_LOGI(TAG, "Audio recorder system init");
-    ESP_ERROR_CHECK(init_sd_card());
+    // ESP_ERROR_CHECK(init_sd_card());  // 屏蔽 SD 卡
     ESP_ERROR_CHECK(init_i2s());
     ESP_ERROR_CHECK(init_es8311((i2c_master_bus_handle_t)i2c_bus));
     return ESP_OK;
@@ -352,6 +359,48 @@ esp_err_t audio_recorder_stop(void)
     return ESP_OK;
 }
 
+// ==================== 内存采集 API ====================
+
+esp_err_t audio_recorder_read_samples(int16_t *buffer, size_t samples, int timeout_ms)
+{
+    if (!s_i2s_rx_chan || !buffer || samples == 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    size_t bytes_to_read = samples * sizeof(int16_t);
+    size_t bytes_read = 0;
+    size_t offset = 0;
+
+    // 分块读取，直到凑够 samples
+    int64_t start = esp_timer_get_time();
+    int64_t timeout_us = (int64_t)timeout_ms * 1000;
+
+    while (offset < bytes_to_read) {
+        size_t chunk = 0;
+        esp_err_t ret = i2s_channel_read(
+            s_i2s_rx_chan,
+            (uint8_t *)buffer + offset,
+            bytes_to_read - offset,
+            &chunk,
+            pdMS_TO_TICKS(100)
+        );
+
+        if (ret == ESP_OK && chunk > 0) {
+            offset += chunk;
+        } else if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "i2s_channel_read error: %s", esp_err_to_name(ret));
+        }
+
+        // 检查超时
+        if ((esp_timer_get_time() - start) > timeout_us) {
+            ESP_LOGW(TAG, "Read timeout: got %d/%d samples", (int)(offset / sizeof(int16_t)), (int)samples);
+            return ESP_ERR_TIMEOUT;
+        }
+    }
+
+    return ESP_OK;
+}
+
 void audio_recorder_system_deinit(void)
 {
     if (s_codec_dev) {
@@ -359,8 +408,32 @@ void audio_recorder_system_deinit(void)
         esp_codec_dev_delete(s_codec_dev);
         s_codec_dev = NULL;
     }
-    if (s_i2s_tx_chan) { i2s_del_channel(s_i2s_tx_chan); s_i2s_tx_chan = NULL; }
+    // 只删除 RX 通道
     if (s_i2s_rx_chan) { i2s_del_channel(s_i2s_rx_chan); s_i2s_rx_chan = NULL; }
     if (s_sd_card) { esp_vfs_fat_sdcard_unmount(MOUNT_POINT, s_sd_card); s_sd_card = NULL; }
     ESP_LOGI(TAG, "Audio recorder deinit");
+}
+
+esp_err_t audio_recorder_save_pcm(const char *path, const int16_t *buffer, size_t samples)
+{
+    if (!path || !buffer || samples == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        ESP_LOGE(TAG, "Failed to open %s for writing", path);
+        return ESP_FAIL;
+    }
+
+    size_t written = fwrite(buffer, sizeof(int16_t), samples, f);
+    fclose(f);
+
+    if (written != samples) {
+        ESP_LOGE(TAG, "PCM write failed: %d/%d", (int)written, (int)samples);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "PCM saved: %s (%d samples, %d bytes)", path, (int)samples, (int)(samples * sizeof(int16_t)));
+    return ESP_OK;
 }

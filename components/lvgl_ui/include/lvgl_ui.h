@@ -6,9 +6,10 @@
 
 // 界面状态
 typedef enum {
-    UI_STATE_HOME,       // 主界面
-    UI_STATE_FALL_DEBUG, // 跌倒检测调试界面
-    UI_STATE_RECORD,     // 录音界面
+    UI_STATE_HOME,           // 主界面
+    UI_STATE_FALL_DEBUG,     // 跌倒检测调试界面
+    UI_STATE_RECORD,         // 录音界面
+    UI_STATE_BABYSOUND,      // 婴儿声音检测演示界面
 } ui_state_t;
 
 // 初始化 LVGL 显示系统
@@ -32,6 +33,9 @@ bool lvgl_ui_should_start_fall_debug(void);
 // 检查是否应该进入录音界面
 bool lvgl_ui_should_start_record(void);
 
+// 检查是否应该进入婴儿声音检测界面
+bool lvgl_ui_should_start_babysound(void);
+
 // 检查是否应该返回主界面
 bool lvgl_ui_should_return_home(void);
 
@@ -43,5 +47,17 @@ bool lvgl_ui_should_pause_detect(void);
 
 // 检查是否需要恢复跌倒检测（退出录音界面）
 bool lvgl_ui_should_resume_detect(void);
+
+// 检查是否需要暂停婴儿声音检测（进入录音界面）
+bool lvgl_ui_should_pause_babysound(void);
+
+// 检查是否需要恢复婴儿声音检测（退出录音界面）
+bool lvgl_ui_should_resume_babysound(void);
+
+// 获取婴儿声音检测开关状态（true=开启，false=关闭）
+bool lvgl_ui_babysound_switch_is_on(void);
+
+// 设置婴儿声音检测开关状态
+void lvgl_ui_set_babysound_switch(bool on);
 
 #endif
