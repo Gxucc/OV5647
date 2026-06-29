@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -17,21 +18,25 @@ typedef struct {
     const char *save_path;
 } audio_recorder_cfg_t;
 
+// 系统级初始化/反初始化（包含 SD 卡、I2S、Codec、统一采集任务）
 esp_err_t audio_recorder_system_init(void *i2c_bus);
-esp_err_t audio_recorder_start(const audio_recorder_cfg_t *cfg);
-bool audio_recorder_is_running(void);
-esp_err_t audio_recorder_stop(void);
 void audio_recorder_system_deinit(void);
+
+// 录音功能（从统一采集缓冲区读取，不直接访问 I2S）
+esp_err_t audio_recorder_start(const audio_recorder_cfg_t *cfg);
+esp_err_t audio_recorder_stop(void);
+bool audio_recorder_is_running(void);
+
+// 实时采样读取（供婴儿声音检测等模块使用，从统一采集缓冲区读取）
 esp_err_t audio_recorder_read_samples(int16_t *buffer, size_t samples, int timeout_ms);
 
-/**
- * @brief 保存 PCM 数据到 SD 卡（原始 int16，无 WAV 头）
- * @param path 文件路径，如 "/sdcard/env_10s.pcm"
- * @param buffer PCM 数据
- * @param samples 样本数
- * @return ESP_OK 成功
- */
+// 直接保存 PCM 到 SD 卡
 esp_err_t audio_recorder_save_pcm(const char *path, const int16_t *buffer, size_t samples);
+
+// 统一音频采集控制
+esp_err_t audio_capture_start(void);   // 启动后台采集任务
+void audio_capture_stop(void);         // 停止后台采集任务
+bool audio_capture_is_running(void);
 
 #ifdef __cplusplus
 }

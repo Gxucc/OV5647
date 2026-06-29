@@ -40,10 +40,6 @@ static volatile bool s_should_start_fall_debug = false;
 static volatile bool s_should_start_record = false;
 static volatile bool s_should_start_babysound = false;
 static volatile bool s_should_return_home = false;
-static volatile bool s_should_pause_detect = false;
-static volatile bool s_should_resume_detect = false;
-static volatile bool s_should_pause_babysound = false;
-static volatile bool s_should_resume_babysound = false;
 
 // 婴儿声音检测开关状态（默认开启）
 static volatile bool s_babysound_switch_on = true;
@@ -203,14 +199,12 @@ static void create_fall_debug_screen(void)
     lv_obj_set_style_bg_color(s_fall_debug_screen, lv_color_hex(0x000000), 0);
     lv_obj_set_size(s_fall_debug_screen, LCD_WIDTH, LCD_HEIGHT);
 
-    // 提示文字
     lv_obj_t *label = lv_label_create(s_fall_debug_screen);
     lv_label_set_text(label, "Swipe right to return");
     lv_obj_set_style_text_color(label, lv_color_hex(0xffffff), 0);
     lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
     lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 20);
 
-    // 添加右滑手势检测区域
     lv_obj_t *gesture_area = lv_obj_create(s_fall_debug_screen);
     lv_obj_set_size(gesture_area, LCD_WIDTH, LCD_HEIGHT);
     lv_obj_set_style_bg_opa(gesture_area, LV_OPA_0, 0);
@@ -227,21 +221,18 @@ static void create_record_screen(void)
     lv_obj_set_style_bg_color(s_record_screen, lv_color_hex(0x1a1a2e), 0);
     lv_obj_set_size(s_record_screen, LCD_WIDTH, LCD_HEIGHT);
 
-    // 标题
     lv_obj_t *label_title = lv_label_create(s_record_screen);
     lv_label_set_text(label_title, "Voice Recorder");
     lv_obj_set_style_text_color(label_title, lv_color_hex(0xffffff), 0);
     lv_obj_set_style_text_font(label_title, &lv_font_montserrat_14, 0);
     lv_obj_align(label_title, LV_ALIGN_TOP_MID, 0, 60);
 
-    // 状态提示（Recording / Saved / Ready）
     s_record_label_status = lv_label_create(s_record_screen);
     lv_label_set_text(s_record_label_status, "Ready");
     lv_obj_set_style_text_color(s_record_label_status, lv_color_hex(0xaaaaaa), 0);
     lv_obj_set_style_text_font(s_record_label_status, &lv_font_montserrat_14, 0);
     lv_obj_align(s_record_label_status, LV_ALIGN_CENTER, 0, -40);
 
-    // 底部录音按钮
     s_record_btn = lv_btn_create(s_record_screen);
     lv_obj_set_size(s_record_btn, 200, 60);
     lv_obj_align(s_record_btn, LV_ALIGN_BOTTOM_MID, 0, -80);
@@ -256,7 +247,6 @@ static void create_record_screen(void)
 
     lv_obj_add_event_cb(s_record_btn, record_btn_event_cb, LV_EVENT_CLICKED, NULL);
 
-    // 右滑返回提示
     lv_obj_t *label_hint = lv_label_create(s_record_screen);
     lv_label_set_text(label_hint, "Swipe right to return");
     lv_obj_set_style_text_color(label_hint, lv_color_hex(0x666666), 0);
@@ -271,38 +261,32 @@ static void create_babysound_screen(void)
     lv_obj_set_style_bg_color(s_babysound_screen, lv_color_hex(0x1a1a2e), 0);
     lv_obj_set_size(s_babysound_screen, LCD_WIDTH, LCD_HEIGHT);
 
-    // 标题
     lv_obj_t *label_title = lv_label_create(s_babysound_screen);
     lv_label_set_text(label_title, "Baby Sound Detection");
     lv_obj_set_style_text_color(label_title, lv_color_hex(0xffffff), 0);
     lv_obj_set_style_text_font(label_title, &lv_font_montserrat_14, 0);
     lv_obj_align(label_title, LV_ALIGN_TOP_MID, 0, 60);
 
-    // 状态提示（默认 ON）
     s_babysound_label_status = lv_label_create(s_babysound_screen);
     lv_label_set_text(s_babysound_label_status, "Detection: ON");
     lv_obj_set_style_text_color(s_babysound_label_status, lv_color_hex(0x07E0), 0);
     lv_obj_set_style_text_font(s_babysound_label_status, &lv_font_montserrat_14, 0);
     lv_obj_align(s_babysound_label_status, LV_ALIGN_CENTER, 0, -40);
 
-    // 开关控件（默认开启）
     s_babysound_switch = lv_switch_create(s_babysound_screen);
     lv_obj_align(s_babysound_switch, LV_ALIGN_CENTER, 0, 40);
     lv_obj_set_style_bg_color(s_babysound_switch, lv_color_hex(0x555555), 0);
     lv_obj_set_style_bg_color(s_babysound_switch, lv_color_hex(0x07E0), LV_STATE_CHECKED);
-    // 默认开启
     lv_obj_add_state(s_babysound_switch, LV_STATE_CHECKED);
 
     lv_obj_add_event_cb(s_babysound_switch, babysound_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
-    // 开关标签
     lv_obj_t *label_sw = lv_label_create(s_babysound_screen);
     lv_label_set_text(label_sw, "Auto Detection");
     lv_obj_set_style_text_color(label_sw, lv_color_hex(0xffffff), 0);
     lv_obj_set_style_text_font(label_sw, &lv_font_montserrat_14, 0);
     lv_obj_align_to(label_sw, s_babysound_switch, LV_ALIGN_OUT_TOP_MID, 0, -10);
 
-    // 右滑返回提示
     lv_obj_t *label_hint = lv_label_create(s_babysound_screen);
     lv_label_set_text(label_hint, "Swipe right to return");
     lv_obj_set_style_text_color(label_hint, lv_color_hex(0x666666), 0);
@@ -310,7 +294,7 @@ static void create_babysound_screen(void)
     lv_obj_align(label_hint, LV_ALIGN_BOTTOM_MID, 0, -20);
 }
 
-// 右滑返回手势检测（复用给所有界面）
+// 右滑返回手势检测
 static void gesture_event_cb(lv_event_t *e)
 {
     lv_indev_t *indev = lv_indev_get_act();
@@ -326,7 +310,6 @@ esp_err_t lvgl_ui_init(void)
 {
     ESP_LOGI(TAG, "Initializing LVGL UI");
 
-    // 获取面板和 IO
     esp_lcd_panel_handle_t panel = lcd_display_get_panel();
     esp_lcd_panel_io_handle_t io = lcd_display_get_io();
     if (!panel || !io) {
@@ -334,7 +317,6 @@ esp_err_t lvgl_ui_init(void)
         return ESP_FAIL;
     }
 
-    // 初始化适配器
     esp_lv_adapter_config_t cfg = ESP_LV_ADAPTER_DEFAULT_CONFIG();
     ESP_ERROR_CHECK(esp_lv_adapter_init(&cfg));
 
@@ -344,7 +326,6 @@ esp_err_t lvgl_ui_init(void)
     );
     ESP_LOGI(TAG, "Required frame buffers for DOUBLE_FULL mode: %d", num_fbs);
 
-    // 注册 MIPI DSI 显示
     esp_lv_adapter_display_config_t disp_cfg = ESP_LV_ADAPTER_DISPLAY_MIPI_DEFAULT_CONFIG(
         panel,
         io,
@@ -358,25 +339,20 @@ esp_err_t lvgl_ui_init(void)
         return ESP_FAIL;
     }
 
-    // 启动适配器
     ESP_ERROR_CHECK(esp_lv_adapter_start());
 
-    // 初始化触摸
     ESP_ERROR_CHECK(touch_gt911_init());
 
-    // 注册 LVGL 输入设备
     lv_indev_t *indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(indev, lvgl_touch_read);
 
-    // 创建界面
     if (esp_lv_adapter_lock(-1) == ESP_OK) {
         create_home_screen();
         create_fall_debug_screen();
         create_record_screen();
         create_babysound_screen();
 
-        // 添加手势事件到所有非主界面
         lv_obj_add_event_cb(s_fall_debug_screen, gesture_event_cb, LV_EVENT_GESTURE, NULL);
         lv_obj_add_event_cb(s_record_screen, gesture_event_cb, LV_EVENT_GESTURE, NULL);
         lv_obj_add_event_cb(s_babysound_screen, gesture_event_cb, LV_EVENT_GESTURE, NULL);
@@ -403,18 +379,12 @@ ui_state_t lvgl_ui_get_state(void)
 
 void lvgl_ui_set_state(ui_state_t state)
 {
-    ui_state_t prev_state = s_state;
     s_state = state;
 
     if (esp_lv_adapter_lock(-1) == ESP_OK) {
         if (state == UI_STATE_HOME) {
             lv_scr_load(s_home_screen);
             s_should_return_home = false;
-            // 如果从录音界面返回，恢复跌倒检测和婴儿声音检测
-            if (prev_state == UI_STATE_RECORD) {
-                s_should_resume_detect = true;
-                s_should_resume_babysound = true;
-            }
             // 重置录音界面状态
             if (s_record_label_status) {
                 lv_label_set_text(s_record_label_status, "Ready");
@@ -429,34 +399,31 @@ void lvgl_ui_set_state(ui_state_t state)
         } else if (state == UI_STATE_RECORD) {
             lv_scr_load(s_record_screen);
             s_should_start_record = false;
-            // 进入录音界面，暂停跌倒检测和婴儿声音检测
-            s_should_pause_detect = true;
-            s_should_pause_babysound = true;
         } else if (state == UI_STATE_BABYSOUND) {
             lv_scr_load(s_babysound_screen);
             s_should_start_babysound = false;
         }
         esp_lv_adapter_unlock();
     }
-    ESP_LOGI(TAG, "State changed to: %s", 
-             state == UI_STATE_HOME ? "HOME" : 
-             state == UI_STATE_FALL_DEBUG ? "FALL_DEBUG" : 
+    ESP_LOGI(TAG, "State changed to: %s",
+             state == UI_STATE_HOME ? "HOME" :
+             state == UI_STATE_FALL_DEBUG ? "FALL_DEBUG" :
              state == UI_STATE_RECORD ? "RECORD" : "BABYSOUND");
 }
 
 void lvgl_ui_task_handler(void)
 {
     // 检查右滑返回
-    if ((s_state == UI_STATE_FALL_DEBUG || s_state == UI_STATE_RECORD || s_state == UI_STATE_BABYSOUND) && s_should_return_home) {
+    if ((s_state == UI_STATE_FALL_DEBUG || s_state == UI_STATE_RECORD || s_state == UI_STATE_BABYSOUND)
+        && s_should_return_home) {
         lvgl_ui_set_state(UI_STATE_HOME);
     }
 
-    // 检查录音是否完成（从 running 变为 not running）
+    // 检查录音是否完成
     static bool s_was_recording = false;
     bool is_recording = audio_recorder_is_running();
 
     if (s_was_recording && !is_recording) {
-        // 录音刚结束
         if (esp_lv_adapter_lock(-1) == ESP_OK) {
             if (s_record_label_status) {
                 lv_label_set_text(s_record_label_status, "Saved");
@@ -504,34 +471,6 @@ bool lvgl_ui_should_return_home(void)
 void lvgl_ui_set_return_home(void)
 {
     s_should_return_home = true;
-}
-
-bool lvgl_ui_should_pause_detect(void)
-{
-    bool ret = s_should_pause_detect;
-    s_should_pause_detect = false;
-    return ret;
-}
-
-bool lvgl_ui_should_resume_detect(void)
-{
-    bool ret = s_should_resume_detect;
-    s_should_resume_detect = false;
-    return ret;
-}
-
-bool lvgl_ui_should_pause_babysound(void)
-{
-    bool ret = s_should_pause_babysound;
-    s_should_pause_babysound = false;
-    return ret;
-}
-
-bool lvgl_ui_should_resume_babysound(void)
-{
-    bool ret = s_should_resume_babysound;
-    s_should_resume_babysound = false;
-    return ret;
 }
 
 bool lvgl_ui_babysound_switch_is_on(void)
