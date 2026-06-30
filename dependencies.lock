@@ -75,6 +75,16 @@ dependencies:
     - esp32s3
     - esp32s31
     version: 3.3.6
+  espressif/esp_audio_codec:
+    component_hash: 16e2880dbdd5a72264051f750f33a6e5a38fd25621c83e3a32a85a152d2d2643
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 2.5.0
   espressif/esp_cam_sensor:
     component_hash: 0a2775d95fae99449bb4c044feab6d887e9db309602fad8df6c3fc58bc6e1b6d
     dependencies:
@@ -509,6 +519,7 @@ dependencies:
     version: 9.5.0
 direct_dependencies:
 - espressif/esp-dl
+- espressif/esp_audio_codec
 - espressif/esp_codec_dev
 - espressif/esp_hosted
 - espressif/esp_lcd_ek79007
@@ -518,6 +529,6 @@ direct_dependencies:
 - espressif/esp_wifi_remote
 - espressif/pedestrian_detect
 - idf
-manifest_hash: 83643e9814167b088f7b15cda3ef9ec1edf002da60e2ad39dabda368bec17edd
+manifest_hash: 07b4c84058a3868d56171442095da14277f4e70c5284a98fb60458fab9b7a782
 target: esp32p4
 version: 2.0.0
