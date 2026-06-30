@@ -29,6 +29,7 @@ static lv_obj_t *s_record_screen = NULL;
 static lv_obj_t *s_record_btn = NULL;
 static lv_obj_t *s_record_label_status = NULL;
 static lv_obj_t *s_record_label_btn = NULL;
+static lv_obj_t *s_record_label_send_status = NULL;
 
 // 婴儿声音检测界面对象
 static lv_obj_t *s_babysound_screen = NULL;
@@ -40,12 +41,14 @@ static volatile bool s_should_start_fall_debug = false;
 static volatile bool s_should_start_record = false;
 static volatile bool s_should_start_babysound = false;
 static volatile bool s_should_return_home = false;
+static volatile bool s_should_toggle_record = false;  // 新增：录音按钮被点击
 
 // 婴儿声音检测开关状态（默认开启）
 static volatile bool s_babysound_switch_on = true;
 
-// 录音编号
-static int s_rec_number = 1;
+// 发送状态
+static volatile ui_send_status_t s_send_status = UI_SEND_STATUS_NONE;
+static volatile int s_send_progress = 0;
 
 // 触摸读取回调函数
 static void lvgl_touch_read(lv_indev_t *indev, lv_indev_data_t *data)
@@ -83,34 +86,7 @@ static void btn_event_cb(lv_event_t *e)
 static void record_btn_event_cb(lv_event_t *e)
 {
     ESP_LOGI(TAG, "Record button clicked, running=%d", audio_recorder_is_running());
-    if (audio_recorder_is_running()) {
-        ESP_LOGI(TAG, "Stop recording requested");
-        audio_recorder_stop();
-    } else {
-        char path[64];
-        snprintf(path, sizeof(path), "/sdcard/rec_%03d.wav", s_rec_number++);
-        ESP_LOGI(TAG, "Start recording to %s", path);
-
-        audio_recorder_cfg_t cfg = {
-            .sample_rate = 16000,
-            .bits_per_sample = 16,
-            .channel_count = 1,
-            .duration_ms = 10000,
-            .save_path = path,
-        };
-        esp_err_t ret = audio_recorder_start(&cfg);
-        ESP_LOGI(TAG, "audio_recorder_start ret=%s", esp_err_to_name(ret));
-
-        if (ret == ESP_OK) {
-            if (s_record_label_status) {
-                lv_label_set_text(s_record_label_status, "Recording");
-                lv_obj_set_style_text_color(s_record_label_status, lv_color_hex(0xe94560), 0);
-            }
-            if (s_record_label_btn) {
-                lv_label_set_text(s_record_label_btn, "Stop");
-            }
-        }
-    }
+    s_should_toggle_record = true;
 }
 
 // 婴儿声音检测开关回调
@@ -131,7 +107,8 @@ static void babysound_switch_cb(lv_event_t *e)
     }
 }
 
-// 创建主界面
+// ==================== 创建界面 ====================
+
 static void create_home_screen(void)
 {
     s_home_screen = lv_obj_create(NULL);
@@ -144,7 +121,6 @@ static void create_home_screen(void)
     lv_obj_set_style_text_font(label_title, &lv_font_montserrat_14, 0);
     lv_obj_align(label_title, LV_ALIGN_TOP_MID, 0, 60);
 
-    // 按钮1：跌倒检测调试
     s_btn_fall_debug = lv_btn_create(s_home_screen);
     lv_obj_set_size(s_btn_fall_debug, 320, 60);
     lv_obj_align(s_btn_fall_debug, LV_ALIGN_CENTER, 0, -80);
@@ -159,7 +135,6 @@ static void create_home_screen(void)
 
     lv_obj_add_event_cb(s_btn_fall_debug, btn_event_cb, LV_EVENT_CLICKED, NULL);
 
-    // 按钮2：录音功能
     s_btn_record = lv_btn_create(s_home_screen);
     lv_obj_set_size(s_btn_record, 320, 60);
     lv_obj_align(s_btn_record, LV_ALIGN_CENTER, 0, 0);
@@ -174,7 +149,6 @@ static void create_home_screen(void)
 
     lv_obj_add_event_cb(s_btn_record, btn_event_cb, LV_EVENT_CLICKED, NULL);
 
-    // 按钮3：婴儿声音检测
     s_btn_babysound = lv_btn_create(s_home_screen);
     lv_obj_set_size(s_btn_babysound, 320, 60);
     lv_obj_align(s_btn_babysound, LV_ALIGN_CENTER, 0, 80);
@@ -192,7 +166,6 @@ static void create_home_screen(void)
     lv_scr_load(s_home_screen);
 }
 
-// 创建跌倒检测调试界面
 static void create_fall_debug_screen(void)
 {
     s_fall_debug_screen = lv_obj_create(NULL);
@@ -214,7 +187,6 @@ static void create_fall_debug_screen(void)
     lv_obj_set_scroll_dir(gesture_area, LV_DIR_HOR);
 }
 
-// 创建录音界面
 static void create_record_screen(void)
 {
     s_record_screen = lv_obj_create(NULL);
@@ -225,17 +197,17 @@ static void create_record_screen(void)
     lv_label_set_text(label_title, "Voice Recorder");
     lv_obj_set_style_text_color(label_title, lv_color_hex(0xffffff), 0);
     lv_obj_set_style_text_font(label_title, &lv_font_montserrat_14, 0);
-    lv_obj_align(label_title, LV_ALIGN_TOP_MID, 0, 60);
+    lv_obj_align(label_title, LV_ALIGN_TOP_MID, 0, 40);
 
     s_record_label_status = lv_label_create(s_record_screen);
     lv_label_set_text(s_record_label_status, "Ready");
     lv_obj_set_style_text_color(s_record_label_status, lv_color_hex(0xaaaaaa), 0);
     lv_obj_set_style_text_font(s_record_label_status, &lv_font_montserrat_14, 0);
-    lv_obj_align(s_record_label_status, LV_ALIGN_CENTER, 0, -40);
+    lv_obj_align(s_record_label_status, LV_ALIGN_CENTER, 0, -60);
 
     s_record_btn = lv_btn_create(s_record_screen);
-    lv_obj_set_size(s_record_btn, 200, 60);
-    lv_obj_align(s_record_btn, LV_ALIGN_BOTTOM_MID, 0, -80);
+    lv_obj_set_size(s_record_btn, 160, 50);
+    lv_obj_align(s_record_btn, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_style_bg_color(s_record_btn, lv_color_hex(0xe94560), 0);
     lv_obj_set_style_bg_color(s_record_btn, lv_color_hex(0xff6b81), LV_STATE_PRESSED);
 
@@ -247,6 +219,13 @@ static void create_record_screen(void)
 
     lv_obj_add_event_cb(s_record_btn, record_btn_event_cb, LV_EVENT_CLICKED, NULL);
 
+    // 发送状态显示
+    s_record_label_send_status = lv_label_create(s_record_screen);
+    lv_label_set_text(s_record_label_send_status, "");
+    lv_obj_set_style_text_color(s_record_label_send_status, lv_color_hex(0xaaaaaa), 0);
+    lv_obj_set_style_text_font(s_record_label_send_status, &lv_font_montserrat_14, 0);
+    lv_obj_align(s_record_label_send_status, LV_ALIGN_CENTER, 0, 60);
+
     lv_obj_t *label_hint = lv_label_create(s_record_screen);
     lv_label_set_text(label_hint, "Swipe right to return");
     lv_obj_set_style_text_color(label_hint, lv_color_hex(0x666666), 0);
@@ -254,7 +233,6 @@ static void create_record_screen(void)
     lv_obj_align(label_hint, LV_ALIGN_BOTTOM_MID, 0, -20);
 }
 
-// 创建婴儿声音检测界面
 static void create_babysound_screen(void)
 {
     s_babysound_screen = lv_obj_create(NULL);
@@ -385,6 +363,12 @@ void lvgl_ui_set_state(ui_state_t state)
         if (state == UI_STATE_HOME) {
             lv_scr_load(s_home_screen);
             s_should_return_home = false;
+        } else if (state == UI_STATE_FALL_DEBUG) {
+            lv_scr_load(s_fall_debug_screen);
+            s_should_start_fall_debug = false;
+        } else if (state == UI_STATE_RECORD) {
+            lv_scr_load(s_record_screen);
+            s_should_start_record = false;
             // 重置录音界面状态
             if (s_record_label_status) {
                 lv_label_set_text(s_record_label_status, "Ready");
@@ -393,12 +377,9 @@ void lvgl_ui_set_state(ui_state_t state)
             if (s_record_label_btn) {
                 lv_label_set_text(s_record_label_btn, "Start");
             }
-        } else if (state == UI_STATE_FALL_DEBUG) {
-            lv_scr_load(s_fall_debug_screen);
-            s_should_start_fall_debug = false;
-        } else if (state == UI_STATE_RECORD) {
-            lv_scr_load(s_record_screen);
-            s_should_start_record = false;
+            if (s_record_label_send_status) {
+                lv_label_set_text(s_record_label_send_status, "");
+            }
         } else if (state == UI_STATE_BABYSOUND) {
             lv_scr_load(s_babysound_screen);
             s_should_start_babysound = false;
@@ -413,17 +394,17 @@ void lvgl_ui_set_state(ui_state_t state)
 
 void lvgl_ui_task_handler(void)
 {
-    // 检查右滑返回
     if ((s_state == UI_STATE_FALL_DEBUG || s_state == UI_STATE_RECORD || s_state == UI_STATE_BABYSOUND)
         && s_should_return_home) {
         lvgl_ui_set_state(UI_STATE_HOME);
     }
 
-    // 检查录音是否完成
     static bool s_was_recording = false;
     bool is_recording = audio_recorder_is_running();
 
+    // 录音状态变化时更新UI
     if (s_was_recording && !is_recording) {
+        // 录音结束
         if (esp_lv_adapter_lock(-1) == ESP_OK) {
             if (s_record_label_status) {
                 lv_label_set_text(s_record_label_status, "Saved");
@@ -436,6 +417,33 @@ void lvgl_ui_task_handler(void)
         }
     }
     s_was_recording = is_recording;
+
+    // 更新发送状态显示
+    if (s_state == UI_STATE_RECORD && s_record_label_send_status) {
+        if (esp_lv_adapter_lock(-1) == ESP_OK) {
+            switch (s_send_status) {
+            case UI_SEND_STATUS_SENDING:
+                {
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), "Sending... %d%%", s_send_progress);
+                    lv_label_set_text(s_record_label_send_status, buf);
+                    lv_obj_set_style_text_color(s_record_label_send_status, lv_color_hex(0xFFFF00), 0);
+                }
+                break;
+            case UI_SEND_STATUS_SUCCESS:
+                lv_label_set_text(s_record_label_send_status, "Send Success!");
+                lv_obj_set_style_text_color(s_record_label_send_status, lv_color_hex(0x07E0), 0);
+                break;
+            case UI_SEND_STATUS_FAILED:
+                lv_label_set_text(s_record_label_send_status, "Send Failed!");
+                lv_obj_set_style_text_color(s_record_label_send_status, lv_color_hex(0xF800), 0);
+                break;
+            default:
+                break;
+            }
+            esp_lv_adapter_unlock();
+        }
+    }
 
     vTaskDelay(pdMS_TO_TICKS(5));
 }
@@ -491,4 +499,25 @@ void lvgl_ui_set_babysound_switch(bool on)
             esp_lv_adapter_unlock();
         }
     }
+}
+
+bool lvgl_ui_should_toggle_record(void)
+{
+    bool ret = s_should_toggle_record;
+    return ret;
+}
+
+void lvgl_ui_clear_toggle_record(void)
+{
+    s_should_toggle_record = false;
+}
+
+void lvgl_ui_set_send_status(ui_send_status_t status)
+{
+    s_send_status = status;
+}
+
+void lvgl_ui_set_send_progress(int progress)
+{
+    s_send_progress = progress;
 }

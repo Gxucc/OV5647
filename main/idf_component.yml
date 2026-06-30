@@ -27,3 +27,4 @@ dependencies:
   espressif/esp_lcd_touch_gt911: ^1.2.0~2
   espressif/esp_codec_dev: ^1.5.10
   espressif/esp_audio_codec: ^2.5.0
+  espressif/human_face_recognition: ^0.3.2

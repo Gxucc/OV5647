@@ -4,15 +4,14 @@
 #include "esp_heap_caps.h"
 #include "driver/i2s_std.h"
 #include "driver/i2c_master.h"
-#include "driver/sdmmc_host.h"
-#include "driver/sdmmc_types.h"
 #include "driver/gpio.h"
-#include "esp_vfs_fat.h"
-#include "sdmmc_cmd.h"
 #include "esp_timer.h"
 #include "esp_codec_dev_defaults.h"
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_vol.h"
+#include "freertos/FreeRTOS.h"      // 新增
+#include "freertos/task.h"          // 新增
+#include "freertos/semphr.h"        // 新增
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -25,15 +24,6 @@ static const char *TAG = "audio_recorder";
 #define I2S_WS_GPIO         GPIO_NUM_10
 #define PA_CTRL_GPIO        GPIO_NUM_53
 
-#define SDMMC_CLK_GPIO      GPIO_NUM_43
-#define SDMMC_CMD_GPIO      GPIO_NUM_44
-#define SDMMC_D0_GPIO       GPIO_NUM_39
-#define SDMMC_D1_GPIO       GPIO_NUM_40
-#define SDMMC_D2_GPIO       GPIO_NUM_41
-#define SDMMC_D3_GPIO       GPIO_NUM_42
-
-#define MOUNT_POINT         "/sdcard"
-
 #define CAPTURE_SAMPLE_RATE     16000
 #define CAPTURE_CHUNK_MS        100
 #define CAPTURE_CHUNK_SAMPLES   (CAPTURE_SAMPLE_RATE * CAPTURE_CHUNK_MS / 1000)
@@ -44,7 +34,6 @@ static const char *TAG = "audio_recorder";
 
 static i2s_chan_handle_t s_i2s_rx_chan = NULL;
 static esp_codec_dev_handle_t s_codec_dev = NULL;
-static sdmmc_card_t *s_sd_card = NULL;
 
 static bool s_is_recording = false;
 static TaskHandle_t s_rec_task = NULL;
@@ -56,11 +45,20 @@ static int16_t *s_ringbuf = NULL;
 static volatile int s_ringbuf_write_idx = 0;
 static SemaphoreHandle_t s_ringbuf_mutex = NULL;
 
+// 录音缓冲区（PSRAM）
+static int16_t *s_rec_buffer = NULL;
+static size_t s_rec_buffer_samples = 0;
+static size_t s_rec_write_idx = 0;
+
+// 录音配置
 static struct {
     int sample_rate;
     int duration_ms;
-    char path[64];
 } s_rec_cfg;
+
+// 录音完成回调
+static audio_recorder_done_cb_t s_done_cb = NULL;
+static void *s_done_cb_ctx = NULL;
 
 // ==================== 环形缓冲区 ====================
 
@@ -109,34 +107,6 @@ static esp_err_t ringbuf_read_recent(int16_t *out, size_t samples)
     }
 
     xSemaphoreGive(s_ringbuf_mutex);
-    return ESP_OK;
-}
-
-// ==================== SD 卡 ====================
-
-static esp_err_t init_sd_card(void)
-{
-    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-    host.max_freq_khz = 10000;
-    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
-    slot_config.clk = SDMMC_CLK_GPIO;
-    slot_config.cmd = SDMMC_CMD_GPIO;
-    slot_config.d0 = SDMMC_D0_GPIO;
-    slot_config.d1 = SDMMC_D1_GPIO;
-    slot_config.d2 = SDMMC_D2_GPIO;
-    slot_config.d3 = SDMMC_D3_GPIO;
-    slot_config.width = 4;
-    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = true,
-        .max_files = 5,
-        .allocation_unit_size = 16 * 1024,
-    };
-    esp_err_t ret = esp_vfs_fat_sdmmc_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &s_sd_card);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "SD card mount failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    ESP_LOGI(TAG, "SD card mounted at %s", MOUNT_POINT);
     return ESP_OK;
 }
 
@@ -292,15 +262,14 @@ static void capture_task(void *arg)
     vTaskDelete(NULL);
 }
 
-// ==================== 录音任务（直接读 I2S） ====================
+// ==================== 录音任务（录音到内存缓冲区） ====================
 
 static void recorder_task(void *arg)
 {
     int sample_rate = s_rec_cfg.sample_rate;
     int duration_ms = s_rec_cfg.duration_ms;
-    const char *path = s_rec_cfg.path;
 
-    ESP_LOGI(TAG, "recorder_task started: sr=%d, dur=%d, path=%s", sample_rate, duration_ms, path);
+    ESP_LOGI(TAG, "recorder_task started: sr=%d, dur=%d", sample_rate, duration_ms);
 
     size_t chunk_bytes = CAPTURE_CHUNK_SAMPLES * sizeof(int16_t);
     int16_t *chunk_buf = heap_caps_malloc(chunk_bytes, MALLOC_CAP_SPIRAM);
@@ -311,28 +280,36 @@ static void recorder_task(void *arg)
         ESP_LOGE(TAG, "Failed to allocate chunk buffer");
         s_is_recording = false;
         s_rec_task = NULL;
+        if (s_done_cb) {
+            s_done_cb(NULL, 0, s_done_cb_ctx);
+        }
         vTaskDelete(NULL);
         return;
     }
 
-    ESP_LOGI(TAG, "Opening %s for writing", path);
-    FILE *f = fopen(path, "wb");
-    if (!f) {
-        ESP_LOGE(TAG, "Failed to open %s", path);
+    // 分配录音缓冲区
+    size_t max_samples = (size_t)sample_rate * duration_ms / 1000;
+    size_t max_bytes = max_samples * sizeof(int16_t);
+    s_rec_buffer = (int16_t *)heap_caps_malloc(max_bytes, MALLOC_CAP_SPIRAM);
+    if (!s_rec_buffer) {
+        s_rec_buffer = (int16_t *)heap_caps_malloc(max_bytes, MALLOC_CAP_INTERNAL);
+    }
+    if (!s_rec_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate recording buffer (%d bytes)", (int)max_bytes);
         heap_caps_free(chunk_buf);
         s_is_recording = false;
         s_rec_task = NULL;
+        if (s_done_cb) {
+            s_done_cb(NULL, 0, s_done_cb_ctx);
+        }
         vTaskDelete(NULL);
         return;
     }
+    s_rec_buffer_samples = max_samples;
+    s_rec_write_idx = 0;
 
-    uint8_t placeholder[44] = {0};
-    fwrite(placeholder, 1, 44, f);
-
-    size_t total_bytes = 0;
     int64_t start_time = esp_timer_get_time();
-
-    ESP_LOGI(TAG, "Recording started, max duration %d ms", duration_ms);
+    ESP_LOGI(TAG, "Recording started, max duration %d ms, max_samples=%d", duration_ms, (int)max_samples);
 
     while (s_is_recording) {
         int64_t elapsed_ms = (esp_timer_get_time() - start_time) / 1000;
@@ -345,12 +322,20 @@ static void recorder_task(void *arg)
         esp_err_t ret = i2s_channel_read(s_i2s_rx_chan, chunk_buf, chunk_bytes, &bytes_read, pdMS_TO_TICKS(CAPTURE_CHUNK_MS + 50));
 
         if (ret == ESP_OK && bytes_read > 0) {
-            size_t written = fwrite(chunk_buf, 1, bytes_read, f);
-            if (written != bytes_read) {
-                ESP_LOGE(TAG, "fwrite failed: %d/%d", written, bytes_read);
+            size_t samples = bytes_read / sizeof(int16_t);
+            // 写入录音缓冲区
+            size_t can_write = s_rec_buffer_samples - s_rec_write_idx;
+            if (samples > can_write) {
+                samples = can_write;
+            }
+            if (samples > 0) {
+                memcpy(&s_rec_buffer[s_rec_write_idx], chunk_buf, samples * sizeof(int16_t));
+                s_rec_write_idx += samples;
+            }
+            if (s_rec_write_idx >= s_rec_buffer_samples) {
+                ESP_LOGI(TAG, "Recording buffer full");
                 break;
             }
-            total_bytes += bytes_read;
         } else if (ret != ESP_OK) {
             ESP_LOGW(TAG, "i2s_channel_read failed: %s", esp_err_to_name(ret));
         }
@@ -361,40 +346,27 @@ static void recorder_task(void *arg)
         }
     }
 
-    ESP_LOGI(TAG, "Recording finished, total %d bytes", total_bytes);
-
-    fflush(f);
-    fsync(fileno(f));
-
-    fseek(f, 0, SEEK_SET);
-
-    uint32_t data_size = total_bytes;
-    uint32_t file_size = data_size + 36;
-    uint8_t wav_header[44] = {
-        'R','I','F','F',
-        (file_size & 0xFF), ((file_size >> 8) & 0xFF), ((file_size >> 16) & 0xFF), ((file_size >> 24) & 0xFF),
-        'W','A','V','E',
-        'f','m','t',' ', 16, 0, 0, 0,
-        1, 0, 1, 0,
-        (sample_rate & 0xFF), ((sample_rate >> 8) & 0xFF), ((sample_rate >> 16) & 0xFF), ((sample_rate >> 24) & 0xFF),
-        ((sample_rate * 2) & 0xFF), (((sample_rate * 2) >> 8) & 0xFF), (((sample_rate * 2) >> 16) & 0xFF), (((sample_rate * 2) >> 24) & 0xFF),
-        2, 0, 16, 0,
-        'd','a','t','a',
-        (data_size & 0xFF), ((data_size >> 8) & 0xFF), ((data_size >> 16) & 0xFF), ((data_size >> 24) & 0xFF),
-    };
-
-    fwrite(wav_header, 1, 44, f);
-    fclose(f);
-
-    ESP_LOGI(TAG, "WAV saved: %s (%d bytes)", path, file_size);
-
-    heap_caps_free(chunk_buf);
-    s_is_recording = false;
-    s_rec_task = NULL;
+    ESP_LOGI(TAG, "Recording finished, total %d samples", (int)s_rec_write_idx);
 
     // 录音结束，恢复采集任务
     audio_capture_start();
 
+    // 调用完成回调
+    if (s_done_cb) {
+        s_done_cb(s_rec_buffer, s_rec_write_idx, s_done_cb_ctx);
+    }
+
+    // 释放录音缓冲区
+    if (s_rec_buffer) {
+        heap_caps_free(s_rec_buffer);
+        s_rec_buffer = NULL;
+        s_rec_buffer_samples = 0;
+        s_rec_write_idx = 0;
+    }
+
+    heap_caps_free(chunk_buf);
+    s_is_recording = false;
+    s_rec_task = NULL;
     vTaskDelete(NULL);
 }
 
@@ -403,7 +375,6 @@ static void recorder_task(void *arg)
 esp_err_t audio_recorder_system_init(void *i2c_bus)
 {
     ESP_LOGI(TAG, "Audio recorder system init");
-    ESP_ERROR_CHECK(init_sd_card());
     ESP_ERROR_CHECK(init_i2s());
     ESP_ERROR_CHECK(init_es8311((i2c_master_bus_handle_t)i2c_bus));
     ringbuf_init();
@@ -412,7 +383,7 @@ esp_err_t audio_recorder_system_init(void *i2c_bus)
 
 bool audio_recorder_is_running(void) { return s_is_recording; }
 
-esp_err_t audio_recorder_start(const audio_recorder_cfg_t *cfg)
+esp_err_t audio_recorder_start(const audio_recorder_cfg_t *cfg, audio_recorder_done_cb_t done_cb, void *user_ctx)
 {
     if (s_is_recording) {
         ESP_LOGW(TAG, "Already recording");
@@ -435,8 +406,8 @@ esp_err_t audio_recorder_start(const audio_recorder_cfg_t *cfg)
 
     s_rec_cfg.sample_rate = cfg && cfg->sample_rate ? cfg->sample_rate : CAPTURE_SAMPLE_RATE;
     s_rec_cfg.duration_ms = cfg && cfg->duration_ms ? cfg->duration_ms : 10000;
-    strncpy(s_rec_cfg.path, cfg && cfg->save_path ? cfg->save_path : "/sdcard/rec_default.wav", sizeof(s_rec_cfg.path) - 1);
-    s_rec_cfg.path[sizeof(s_rec_cfg.path) - 1] = '\0';
+    s_done_cb = done_cb;
+    s_done_cb_ctx = user_ctx;
     s_is_recording = true;
     xTaskCreate(recorder_task, "recorder", 4096, NULL, 5, &s_rec_task);
     return ESP_OK;
@@ -532,36 +503,6 @@ void audio_recorder_system_deinit(void)
         i2s_del_channel(s_i2s_rx_chan);
         s_i2s_rx_chan = NULL;
     }
-    if (s_sd_card) {
-        esp_vfs_fat_sdcard_unmount(MOUNT_POINT, s_sd_card);
-        s_sd_card = NULL;
-    }
     ringbuf_deinit();
     ESP_LOGI(TAG, "Audio recorder deinit");
-}
-
-// ==================== 保存 PCM ====================
-
-esp_err_t audio_recorder_save_pcm(const char *path, const int16_t *buffer, size_t samples)
-{
-    if (!path || !buffer || samples == 0) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    FILE *f = fopen(path, "wb");
-    if (!f) {
-        ESP_LOGE(TAG, "Failed to open %s for writing", path);
-        return ESP_FAIL;
-    }
-
-    size_t written = fwrite(buffer, sizeof(int16_t), samples, f);
-    fclose(f);
-
-    if (written != samples) {
-        ESP_LOGE(TAG, "PCM write failed: %d/%d", (int)written, (int)samples);
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "PCM saved: %s (%d samples, %d bytes)", path, (int)samples, (int)(samples * sizeof(int16_t)));
-    return ESP_OK;
 }
