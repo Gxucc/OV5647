@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "esp_err.h"
+#include "mqtt_client.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,6 +39,7 @@ send_status_t audio_mqtt_sender_get_status(void);
 int audio_mqtt_sender_get_progress(void);
 void audio_mqtt_sender_reset_connection(void);
 esp_err_t audio_mqtt_sender_demo(float freq_hz);
+esp_mqtt_client_handle_t audio_mqtt_sender_get_client(void);
 
 #ifdef __cplusplus
 }

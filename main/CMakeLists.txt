@@ -1,2 +1,2 @@
-idf_component_register(SRCS "lvgl+fall+soundrecord.c" "send_demo.c" 
+idf_component_register(SRCS "debug.c" "lvgl+fall+soundrecord.c" 
                     INCLUDE_DIRS "." )

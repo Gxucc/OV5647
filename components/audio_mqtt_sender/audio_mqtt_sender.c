@@ -14,6 +14,7 @@
 #include "esp_timer.h"
 #include "math.h"
 
+
 static const char *TAG = "audio_mqtt_sender";
 
 // WiFi 配置
@@ -205,7 +206,9 @@ static esp_err_t mqtt_init(void)
     return ESP_OK;
 }
 
-// ==================== MQTT 发送 PCM 整包 ====================
+// ==================== MQTT 发送 PCM 分片 ====================
+
+#define MQTT_MAX_PAYLOAD 4096  //切片大小
 
 static void mqtt_send_pcm_raw(const int16_t *pcm_data, size_t samples)
 {
@@ -215,50 +218,72 @@ static void mqtt_send_pcm_raw(const int16_t *pcm_data, size_t samples)
         return;
     }
 
-    uint16_t seq_id = s_seq_id++;
+    uint32_t seq_id = s_seq_id++;  // 改为 32 位
     size_t pcm_bytes = samples * sizeof(int16_t);
+    size_t total_chunks = (pcm_bytes + MQTT_MAX_PAYLOAD - 1) / MQTT_MAX_PAYLOAD;
 
     ESP_LOGI(TAG, "========== SENDING START ==========");
-    ESP_LOGI(TAG, "seq_id=%d, samples=%d, pcm_bytes=%d", seq_id, (int)samples, (int)pcm_bytes);
+    ESP_LOGI(TAG, "seq_id=%lu, samples=%d, pcm_bytes=%d, chunks=%d", 
+             seq_id, (int)samples, (int)pcm_bytes, (int)total_chunks);
 
-    size_t msg_len = 8 + pcm_bytes;
-    uint8_t *msg = heap_caps_malloc(msg_len, MALLOC_CAP_SPIRAM);
-    if (!msg) {
-        msg = malloc(msg_len);
+    for (size_t chunk_idx = 0; chunk_idx < total_chunks; chunk_idx++) {
+        size_t offset = chunk_idx * MQTT_MAX_PAYLOAD;
+        size_t chunk_len = (offset + MQTT_MAX_PAYLOAD > pcm_bytes) ? 
+                           (pcm_bytes - offset) : MQTT_MAX_PAYLOAD;
+        
+        size_t msg_len = 12 + chunk_len;  // 12 字节 header（原来是 8）
+        uint8_t *msg = heap_caps_malloc(msg_len, MALLOC_CAP_SPIRAM);
+        if (!msg) {
+            msg = malloc(msg_len);
+        }
+        if (!msg) {
+            ESP_LOGE(TAG, "Failed to alloc msg buffer for chunk %d", (int)chunk_idx);
+            s_send_status = SEND_STATUS_FAILED;
+            return;
+        }
+
+        // Header (12 bytes) - 修复 uint8_t 溢出
+        msg[0] = (seq_id >> 24) & 0xFF;  // seq_id 高字节
+        msg[1] = (seq_id >> 16) & 0xFF;
+        msg[2] = (seq_id >> 8) & 0xFF;
+        msg[3] = seq_id & 0xFF;          // seq_id 低字节
+        
+        msg[4] = (chunk_idx >> 8) & 0xFF;   // chunk_idx 高字节
+        msg[5] = chunk_idx & 0xFF;           // chunk_idx 低字节
+        
+        msg[6] = (total_chunks >> 8) & 0xFF; // total_chunks 高字节
+        msg[7] = total_chunks & 0xFF;        // total_chunks 低字节
+        
+        msg[8] = (SENDER_SAMPLE_RATE >> 8) & 0xFF;
+        msg[9] = SENDER_SAMPLE_RATE & 0xFF;
+        
+        msg[10] = 1;     // channels
+        msg[11] = 0;     // format = 0 表示原始 PCM
+
+        memcpy(msg + 12, (uint8_t*)pcm_data + offset, chunk_len);
+
+        int msg_id = esp_mqtt_client_publish(s_mqtt_client, MQTT_TOPIC_AUDIO,
+                                              (char *)msg, msg_len, 0, 0);
+        if (msg_id < 0) {
+            ESP_LOGE(TAG, "MQTT publish chunk %d/%d failed", (int)chunk_idx + 1, (int)total_chunks);
+            free(msg);
+            s_send_status = SEND_STATUS_FAILED;
+            return;
+        }
+        
+        if (chunk_idx % 10 == 0 || chunk_idx == total_chunks - 1) {
+            ESP_LOGI(TAG, "Published chunk %d/%d, msg_id=%d, payload=%d bytes",
+                     (int)chunk_idx + 1, (int)total_chunks, msg_id, (int)chunk_len);
+        }
+
+        free(msg);
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
-    if (!msg) {
-        ESP_LOGE(TAG, "Failed to alloc msg buffer");
-        s_send_status = SEND_STATUS_FAILED;
-        return;
-    }
-
-    msg[0] = (seq_id >> 8) & 0xFF;
-    msg[1] = seq_id & 0xFF;
-    msg[2] = 0;     // chunk_idx = 0
-    msg[3] = 1;     // total_chunks = 1 (整包)
-    msg[4] = (SENDER_SAMPLE_RATE >> 8) & 0xFF;
-    msg[5] = SENDER_SAMPLE_RATE & 0xFF;
-    msg[6] = 1;     // channels
-    msg[7] = 0;     // format = 0 表示原始 PCM
-
-    memcpy(msg + 8, pcm_data, pcm_bytes);
-
-    int msg_id = esp_mqtt_client_publish(s_mqtt_client, MQTT_TOPIC_AUDIO,
-                                          (char *)msg, msg_len, 0, 0);
-    if (msg_id < 0) {
-        ESP_LOGE(TAG, "MQTT publish failed");
-        s_send_status = SEND_STATUS_FAILED;
-    } else {
-        ESP_LOGI(TAG, "Published PCM raw, msg_id=%d, payload=%d bytes",
-                 msg_id, (int)pcm_bytes);
-        s_send_status = SEND_STATUS_SUCCESS;
-        s_send_progress = 100;
-    }
-
-    free(msg);
 
     ESP_LOGI(TAG, "========== SENDING COMPLETE ==========");
-    ESP_LOGI(TAG, "seq_id=%d sent successfully", seq_id);
+    ESP_LOGI(TAG, "seq_id=%lu sent successfully in %d chunks", seq_id, (int)total_chunks);
+    s_send_status = SEND_STATUS_SUCCESS;
+    s_send_progress = 100;
 }
 
 // ==================== 读取 WAV 并提取 PCM ====================
@@ -481,4 +506,8 @@ esp_err_t audio_mqtt_sender_demo(float freq_hz)
 
     ESP_LOGI(TAG, "========== DEMO END ==========");
     return ESP_OK;
+}
+esp_mqtt_client_handle_t audio_mqtt_sender_get_client(void)
+{
+    return s_mqtt_client;
 }
